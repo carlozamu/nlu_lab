@@ -81,3 +81,17 @@ def variational_dropout(x, dropout_rate, training=True):
     mask = x.new_empty(x.size(0), 1, x.size(2)).bernoulli_(1 - dropout_rate)
     mask = mask.div_(1 - dropout_rate)
     return x * mask
+
+
+class VariationalDropout(nn.Module):
+    def __init__(self, dropout):
+        super().__init__()
+        self.dropout = dropout
+
+    def forward(self, x):
+        if not self.training or self.dropout == 0:
+            return x
+        # Applica la stessa maschera su tutti i time step
+        mask = x.new_empty(x.size(0), 1, x.size(2)).bernoulli_(1 - self.dropout)
+        mask = mask / (1 - self.dropout)
+        return x * mask
