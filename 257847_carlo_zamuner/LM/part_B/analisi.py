@@ -1,25 +1,26 @@
 import os
 import re
 import pandas as pd
+import matplotlib.pyplot as plt
 
-# Percorso della cartella results (modifica se necessario)
+# Cartella contenente i risultati (modifica se necessario)
 results_dir = "results"
 
-# Lista per salvare i record per ogni configurazione
+# Lista per raccogliere i record da ogni configurazione
 records = []
 
-# Pattern per estrarre gli iperparametri dal nome della cartella
+# Pattern per estrarre i valori di emb_dropout, fc_dropout e alpha dal nome della cartella
 pattern = r"emb([\d\.]+)_fc([\d\.]+)_alpha([\d\.]+)"
 
-# Itera su tutte le sottocartelle di results
+# Scansiona ogni sottocartella in results
 for folder in os.listdir(results_dir):
     folder_path = os.path.join(results_dir, folder)
     if os.path.isdir(folder_path):
-        csv_path = os.path.join(folder_path, "training_summary.csv")
-        if os.path.exists(csv_path):
-            # Legge il CSV
-            df = pd.read_csv(csv_path)
-            # Calcola il Dev PPL minimo (o altra statistica, ad es. ultimo valore)
+        csv_file = os.path.join(folder_path, "training_summary.csv")
+        if os.path.exists(csv_file):
+            # Legge il CSV per ottenere il Dev PPL minimo
+            df = pd.read_csv(csv_file)
+            # Supponiamo che il file CSV abbia una colonna chiamata "Dev PPL"
             min_dev_ppl = df["Dev PPL"].min()
             
             # Estrae gli iperparametri dal nome della cartella
@@ -39,22 +40,42 @@ for folder in os.listdir(results_dir):
                 "min_dev_ppl": min_dev_ppl
             })
 
-# Crea un DataFrame dai record raccolti
+# Crea un DataFrame dai dati raccolti
 results_df = pd.DataFrame(records)
-# Ordina per Dev PPL minimo (migliore in alto)
 results_df = results_df.sort_values("min_dev_ppl")
 
-print("Confronto delle configurazioni (ordinato per Dev PPL minimo):")
-print(results_df)
-
-# Se desideri creare una pivot table, ad esempio, per visualizzare l'effetto di emb_dropout e fc_dropout per un certo valore di alpha
-# (qui mostriamo la media dei min_dev_ppl per ogni combinazione, raggruppando per emb_dropout e fc_dropout)
-pivot = results_df.pivot_table(
-    index="emb_dropout", 
-    columns="fc_dropout", 
-    values="min_dev_ppl", 
-    aggfunc="mean"
-)
+# Salva i risultati aggregati in un file CSV (opzionale)
 results_df.to_csv("comparison_results.csv", index=False)
-print("\nPivot table (Dev PPL minimo medio per emb_dropout vs fc_dropout):")
-print(pivot)
+print("Aggregated results saved in comparison_results.csv")
+
+# ---------------------------
+# Bar Plot: Min Dev PPL per Configurazione
+# ---------------------------
+plt.figure(figsize=(12, 6))
+plt.bar(range(len(results_df)), results_df["min_dev_ppl"], color="skyblue")
+plt.xticks(range(len(results_df)), results_df["Configuration"], rotation=90)
+plt.title("Min Dev PPL per Configuration")
+plt.ylabel("Min Dev PPL")
+plt.xlabel("Configuration")
+plt.tight_layout()
+plt.savefig("barplot_min_dev_ppl.png")
+plt.close()
+print("Bar plot saved as barplot_min_dev_ppl.png")
+
+# ---------------------------
+# Scatter Plot: emb_dropout vs min_dev_ppl, color-coded by fc_dropout
+# ---------------------------
+plt.figure(figsize=(10, 6))
+unique_fc = sorted(results_df["fc_dropout"].unique())
+for fc_dp in unique_fc:
+    subset = results_df[results_df["fc_dropout"] == fc_dp]
+    plt.scatter(subset["emb_dropout"], subset["min_dev_ppl"], label=f"fc_dropout = {fc_dp}", s=100)
+
+plt.xlabel("emb_dropout")
+plt.ylabel("Min Dev PPL")
+plt.title("Min Dev PPL vs emb_dropout (grouped by fc_dropout)")
+plt.legend(title="fc_dropout")
+plt.tight_layout()
+plt.savefig("scatter_plot.png")
+plt.close()
+print("Scatter plot saved as scatter_plot.png")
