@@ -81,7 +81,6 @@ if __name__ == "__main__":
     ppls_dev = []
     best_dev_ppl = math.inf
     best_model = None
-    avg_model = None
 
     print("Inizio Training...\n")
     pbar = tqdm(range(1, n_epochs + 1), desc="Training")
@@ -91,23 +90,14 @@ if __name__ == "__main__":
         )
         ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
 
-        if epoch == 1:
-            avg_model = copy.deepcopy(model)
-        else:
-            for param, avg_param in zip(model.parameters(), avg_model.parameters()):
-                avg_param.data = alpha * avg_param.data + (1 - alpha) * param.data
-
-        ppl_avg, _ = eval_loop(dev_loader, criterion_eval, avg_model)
-        pbar.set_description(f"Avg PPL: {ppl_avg:.2f}")
-
         sampled_epochs.append(epoch)
         losses_train.append(train_loss)
         losses_dev.append(loss_dev)
-        ppls_dev.append(ppl_avg)
+        ppls_dev.append(ppl_dev)
 
-        if ppl_avg < best_dev_ppl:
-            best_dev_ppl = ppl_avg
-            best_model = copy.deepcopy(avg_model).to("cpu")
+        if ppl_dev < best_dev_ppl:
+            best_dev_ppl = ppl_dev
+            best_model = copy.deepcopy(model).to("cpu")
             patience = 3
         else:
             patience -= 1
