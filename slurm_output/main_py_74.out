@@ -1,0 +1,30 @@
+INFO: Configurazione ambiente Conda...
+INFO: Ambiente Conda 'nlu_env' attivato.
+INFO: Versione Python nell'ambiente:
+Python 3.12.9
+INFO: Caricamento modulo CUDA...
+INFO: Modulo CUDA caricato.
+Tue Apr 15 12:03:11 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.144.03             Driver Version: 550.144.03     CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A30                     On  |   00000000:98:00.0 Off |                    0 |
+| N/A   26C    P0             27W /  165W |       1MiB /  24576MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+INFO: Esecuzione di main.py...
+ERRORE: Esecuzione di main.py fallita con codice di uscita: 1
+INFO: Disattivazione ambiente Conda...
+INFO: Script SLURM terminato.
