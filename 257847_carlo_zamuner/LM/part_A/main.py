@@ -37,7 +37,7 @@ if __name__ == "__main__":
     main_output_folder = os.path.join("results", experiment_name) # Cartella principale per A1
 
     # Liste di iperparametri da testare
-    learning_rates = [0.001, 0.01, 0.05, 0.1, 1.0, 1.5]
+    learning_rates = [0.1, 1.0, 1.5]
     batch_sizes = [16, 32, 64, 128]
 
     # Parametri fissi
