@@ -1,0 +1,10 @@
+Experiment: puntoA3 (Step 3: LSTM + Dropout + AdamW)
+Configuration: lr_1.5_bs_64_emb_200_hid_300_drop_0.1_0.1
+Optimizer: AdamW
+-------------------------------------
+Best Development PPL: 2916.8826
+Final Test PPL: 2862.9237
+Total Epochs Trained: 15
+Achieved Best Dev PPL at Epoch: 12
+Embedding Dropout Rate: 0.1
+FC Dropout Rate: 0.1
