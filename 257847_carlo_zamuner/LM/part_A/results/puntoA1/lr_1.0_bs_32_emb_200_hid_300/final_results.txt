@@ -1,7 +1,7 @@
 Experiment: puntoA1 (Step 1: LSTM + SGD)
 Configuration: lr_1.0_bs_32_emb_200_hid_300
 -------------------------------------
-Best Development PPL: 146.0125
-Final Test PPL: 141.8370
-Total Epochs Trained: 18
-Achieved Best Dev PPL at Epoch: 15
+Best Development PPL: 145.0946
+Final Test PPL: 140.0688
+Total Epochs Trained: 17
+Achieved Best Dev PPL at Epoch: 14
