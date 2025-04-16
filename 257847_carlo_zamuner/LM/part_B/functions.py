@@ -66,32 +66,3 @@ def init_weights(mat):
                 torch.nn.init.uniform_(m.weight, -0.01, 0.01)
                 if m.bias != None:
                     m.bias.data.fill_(0.01)
-
-
-def variational_dropout(x, dropout_rate, training=True):
-    """
-    Applica il variational dropout a x.
-    x: tensore di forma [batch, seq_len, feature_dim]
-    dropout_rate: probabilità di dropout
-    training: se True applica il dropout, altrimenti restituisce x invariato.
-    """
-    if not training or dropout_rate == 0:
-        return x
-    # Crea una maschera con forma [batch, 1, feature_dim] per applicare lo stesso dropout mask su tutta la sequenza
-    mask = x.new_empty(x.size(0), 1, x.size(2)).bernoulli_(1 - dropout_rate)
-    mask = mask.div_(1 - dropout_rate)
-    return x * mask
-
-
-class VariationalDropout(nn.Module):
-    def __init__(self, dropout):
-        super().__init__()
-        self.dropout = dropout
-
-    def forward(self, x):
-        if not self.training or self.dropout == 0:
-            return x
-        # Applica la stessa maschera su tutti i time step
-        mask = x.new_empty(x.size(0), 1, x.size(2)).bernoulli_(1 - self.dropout)
-        mask = mask / (1 - self.dropout)
-        return x * mask
