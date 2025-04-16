@@ -6,10 +6,40 @@ import math
 import numpy as np
 
 
-# Baseline LSTM (Step A1 / B1 Start)
-class LM_LSTM_Base(nn.Module):
-    """Modello Language Model con LSTM base (Step A1 / B1 Start)."""
+# Helper Class: Locked Dropout (Variational Dropout per attivazioni)
+class LockedDropout(nn.Module):
+    """
+    Applica lo stesso dropout mask a tutti i timestep.
+    Utile per applicare dropout a sequenze RNN senza distruggere l'informazione temporale.
+    """
 
+    def __init__(self, dropout=0.5):
+        super().__init__()
+        self.dropout = dropout
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len, feature_dim]
+        if not self.training or self.dropout == 0.0:
+            return x
+
+        # Maschera con shape [batch_size, 1, feature_dim]
+        # Viene applicata tramite broadcasting a tutti i 'seq_len' timesteps.
+        mask_shape = (x.size(0), 1, x.size(2))
+        # Crea maschera (1 dove si tiene, 0 dove si droppa)
+        keep_prob = 1 - self.dropout
+        mask = torch.bernoulli(x.data.new(*mask_shape).fill_(keep_prob))
+
+        # Applica maschera e scala (inverted dropout)
+        # Scaling factor = 1 / keep_prob
+        mask = mask / keep_prob
+        masked_x = x * mask
+
+        return masked_x
+
+
+# Modello LSTM Base (A1 / B1 Start)
+class LM_LSTM_Base(nn.Module):
+    # ... (codice invariato) ...
     def __init__(self, emb_size, hidden_size, output_size, pad_index=0, n_layers=1):
         super(LM_LSTM_Base, self).__init__()
         self.embedding = nn.Embedding(output_size, emb_size, padding_idx=pad_index)
@@ -24,89 +54,98 @@ class LM_LSTM_Base(nn.Module):
         return output
 
 
-# Modello LSTM con Dropout (Step A2/A3) - Riferimento
-class LM_LSTM_With_Dropout(nn.Module):
-    """Modello Language Model con LSTM e Dropout aggiuntivi (Step A2/A3)."""
+# Modello LSTM con Weight Tying (Step B1)
+class LM_LSTM_WeightTying(nn.Module):
+    # ... (codice invariato) ...
+    def __init__(self, emb_size, hidden_size, output_size, pad_index=0, n_layers=1):
+        super(LM_LSTM_WeightTying, self).__init__()
+        assert emb_size == hidden_size, (
+            "Weight Tying requires embedding size to be equal to hidden size."
+        )
+        self.emb_size = emb_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.embedding = nn.Embedding(output_size, emb_size, padding_idx=pad_index)
+        self.lstm = nn.LSTM(emb_size, hidden_size, n_layers, batch_first=True)
+        self.output = nn.Linear(hidden_size, output_size)
+        self.output.weight = self.embedding.weight
 
-    # ... (codice invariato rispetto a prima) ...
+    def forward(self, input_sequence):
+        emb = self.embedding(input_sequence)
+        lstm_out, _ = self.lstm(emb)
+        output_logits = self.output(lstm_out)
+        output = output_logits.permute(0, 2, 1)
+        return output
+
+
+# NUOVO: Modello LSTM con Variational Dropout e Weight Tying (Step B2)
+class LM_LSTM_VarDropWT(nn.Module):
+    """
+    Modello Language Model con LSTM, Weight Tying e Variational (Locked) Dropout.
+    Implementa il secondo passo della Parte B.
+    Applica Locked Dropout a embedding output e LSTM output.
+    Richiede emb_size == hidden_size.
+    """
+
     def __init__(
         self,
         emb_size,
         hidden_size,
         output_size,
         pad_index=0,
-        emb_dropout=0.1,
-        fc_dropout=0.1,
         n_layers=1,
-    ):
-        super(LM_LSTM_With_Dropout, self).__init__()
-        self.embedding = nn.Embedding(output_size, emb_size, padding_idx=pad_index)
-        self.dropout_emb = nn.Dropout(emb_dropout)
-        self.lstm = nn.LSTM(emb_size, hidden_size, n_layers, batch_first=True)
-        self.dropout_fc = nn.Dropout(fc_dropout)
-        self.output = nn.Linear(hidden_size, output_size)
-        self.emb_dropout_rate = emb_dropout
-        self.fc_dropout_rate = fc_dropout
+        dropoute=0.1,
+        dropouto=0.4,
+    ):  # Esempio tassi dropout
+        super(LM_LSTM_VarDropWT, self).__init__()
 
-    def forward(self, input_sequence):
-        emb = self.embedding(input_sequence)
-        emb_dropped = self.dropout_emb(emb)
-        lstm_out, _ = self.lstm(emb_dropped)
-        out_dropped = self.dropout_fc(lstm_out)
-        output = self.output(out_dropped).permute(0, 2, 1)
-        return output
-
-
-# NUOVO: Modello LSTM con Weight Tying (Step B1)
-class LM_LSTM_WeightTying(nn.Module):
-    """
-    Modello Language Model con LSTM e Weight Tying.
-    Implementa il primo passo della Parte B: LSTM base + Weight Tying.
-    Richiede emb_size == hidden_size.
-    """
-
-    def __init__(self, emb_size, hidden_size, output_size, pad_index=0, n_layers=1):
-        super(LM_LSTM_WeightTying, self).__init__()
-
-        # !! Vincolo per Weight Tying !!
         assert emb_size == hidden_size, (
-            "Weight Tying requires embedding size to be equal to hidden size."
+            "Weight Tying requires embedding size == hidden size."
         )
 
         self.emb_size = emb_size
         self.hidden_size = hidden_size
         self.output_size = output_size
+        self.n_layers = n_layers
 
-        # Layer di Embedding
+        # Layers
         self.embedding = nn.Embedding(output_size, emb_size, padding_idx=pad_index)
-
-        # Layer LSTM
-        # Nota: L'input size dell'LSTM è emb_size, l'hidden size è hidden_size
-        self.lstm = nn.LSTM(emb_size, hidden_size, n_layers, batch_first=True)
-
-        # Layer Lineare di Output
-        # L'input è hidden_size, l'output è output_size
+        self.lstm = nn.LSTM(
+            emb_size, hidden_size, n_layers, batch_first=True, dropout=0
+        )  # Disabilita dropout standard LSTM
         self.output = nn.Linear(hidden_size, output_size)
 
-        # --- Implementazione del Weight Tying ---
-        # Condividi i pesi tra embedding e output lineare
+        # Variational (Locked) Dropout Layers
+        self.lockdrop_e = LockedDropout(dropoute)  # Per embedding output
+        self.lockdrop_o = LockedDropout(dropouto)  # Per LSTM output
+
+        # Weight Tying
         self.output.weight = self.embedding.weight
-        # -----------------------------------------
 
-    def forward(self, input_sequence):
-        # Passaggio nell'embedding
+        # Conserva tassi dropout per riferimento
+        self.dropoute_rate = dropoute
+        self.dropouto_rate = dropouto
+
+    def forward(self, input_sequence, hidden=None):  # Aggiunto hidden opzionale
+        # Embedding
         emb = self.embedding(input_sequence)
-        # Nessun dropout qui (è il modello base + tying)
+        # Applica Locked Dropout all'embedding
+        emb_dropped = self.lockdrop_e(emb)
 
-        # Passaggio nell'LSTM
-        lstm_out, _ = self.lstm(emb)
-        # lstm_out ha shape [batch_size, seq_len, hidden_size]
+        # LSTM
+        # L'input all'LSTM è l'embedding con dropout applicato
+        lstm_out, hidden_out = self.lstm(emb_dropped, hidden)
+        # lstm_out shape: [batch_size, seq_len, hidden_size]
 
-        # Passaggio nel layer lineare di output (con pesi condivisi)
-        # Nessun dropout qui
-        output_logits = self.output(lstm_out)
-        # output_logits ha shape [batch_size, seq_len, output_size]
+        # Applica Locked Dropout all'output dell'LSTM
+        lstm_out_dropped = self.lockdrop_o(lstm_out)
 
-        # Permuta per CrossEntropyLoss ([batch_size, output_size, seq_len])
+        # Output Layer (con pesi condivisi)
+        output_logits = self.output(lstm_out_dropped)
+        # output_logits shape: [batch_size, seq_len, output_size]
+
+        # Permuta per CrossEntropyLoss
         output = output_logits.permute(0, 2, 1)
-        return output
+
+        # Restituisce anche hidden state per usi futuri (es. generazione)
+        return output, hidden_out

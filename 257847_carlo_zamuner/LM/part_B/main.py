@@ -1,6 +1,6 @@
-# Questo script esegue l'esperimento corrispondente al Punto B1:
-# - Parte dalla configurazione A1 (LSTM + SGD).
-# - Applica il Weight Tying (richiede emb_size == hidden_size).
+# Questo script esegue l'esperimento corrispondente al Punto B3:
+# - Parte dalla configurazione B2 (LSTM + SGD + WT + VarDrop).
+# - AGGIUNGE Non-monotonically Triggered Averaged SGD (NT-AvSGD).
 # - ITERA su diverse combinazioni di Learning Rate e Batch Size.
 # - Salva risultati (CSV, PNG, TXT) per OGNI combinazione.
 # - ALLA FINE, aggrega i risultati e crea grafici comparativi.
@@ -24,31 +24,35 @@ from tabulate import tabulate
 from functions import train_loop, eval_loop, init_weights
 from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
 
-# !! Importa il modello con Weight Tying !!
-from model import LM_LSTM_WeightTying
+# !! Importa il modello con Variational Dropout e WT (lo stesso di B2) !!
+from model import LM_LSTM_VarDropWT
 
 if __name__ == "__main__":
     # --- 1. Impostazioni Globali e Liste Iperparametri ---
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Global settings: Using device: {DEVICE}")
 
-    # !! Nome Esperimento per Step B1 - Weight Tying !!
-    experiment_name = "puntoB1_WeightTying"
+    # !! Nome Esperimento per Step B3 - NT-AvSGD !!
+    experiment_name = "puntoB3_NTAvSGD"
     main_output_folder = os.path.join(
         "results", experiment_name
-    )  # Cartella principale per B1_WeightTying
+    )  # Cartella principale per B3
 
-    # Liste di iperparametri da testare (usiamo quelle di A1)
+    # Liste di iperparametri da testare (usiamo quelle di A1/B1/B2)
     learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.1]
     batch_sizes = [16, 32, 64, 128]
 
     # Parametri fissi
-    # !! MODIFICATI per Weight Tying: emb == hid !!
     hid = 300
-    emb = 300  # <<--- DEVE ESSERE UGUALE A hid
+    emb = 300  # Mantiene emb == hid per WT
     clip = 5
     n_epochs = 100
-    patience_setting = 3
+    patience_setting = 3  # Pazienza per early stopping standard
+    # Tassi di Variational Dropout (come B2)
+    dropoute_rate = 0.1
+    dropouto_rate = 0.4
+    # !! Parametri per NT-AvSGD !!
+    AVG_TRIGGER_THRESHOLD = 5  # Epoche di non miglioramento per attivare AvSGD
 
     # --- 2. Caricamento Dati e Vocabolario (una sola volta) ---
     print("\nLoading data and building vocabulary (once)...")
@@ -76,12 +80,11 @@ if __name__ == "__main__":
             current_run += 1
             print(f"\n===== RUN {current_run}/{total_runs} =====")
             print(
-                f"Configuration: lr={lr}, batch_size={batch_size}, Optimizer=SGD, Model=WeightTying"
+                f"Configuration: lr={lr}, batch_size={batch_size}, Optimizer=NT-AvSGD, Model=VarDrop+WT, drop_e={dropoute_rate}, drop_o={dropouto_rate}"
             )
 
             # --- 4.1. Configurazione Specifica della Run ---
-            # Aggiorna hyperparam_str con la nuova dimensione emb
-            hyperparam_str = f"lr_{lr}_bs_{batch_size}_emb_{emb}_hid_{hid}_WeightTying"
+            hyperparam_str = f"lr_{lr}_bs_{batch_size}_emb_{emb}_hid_{hid}_VarDropWT_e{dropoute_rate}_o{dropouto_rate}_NTAvSGD{AVG_TRIGGER_THRESHOLD}"
             output_dir = os.path.join(main_output_folder, hyperparam_str)
             os.makedirs(output_dir, exist_ok=True)
             print(f"Output directory for this run: {output_dir}")
@@ -114,23 +117,30 @@ if __name__ == "__main__":
 
             # --- 4.3. Stampa Configurazione della Run ---
             exp_params = [
-                # !! Aggiorna nome step e modello !!
+                # !! Aggiorna nome step e ottimizzatore !!
                 [
                     "Experiment Step",
-                    f"{experiment_name} (Step B1: LSTM + SGD + WeightTying)",
+                    f"{experiment_name} (Step B3: LSTM + NT-AvSGD + WT + VarDrop)",
                 ],
                 ["Run", f"{current_run}/{total_runs}"],
                 ["Output Directory", output_dir],
                 ["Device", DEVICE],
-                ["Model", "LM_LSTM_WeightTying"],  # !! Modello WT !!
-                ["Optimizer", "SGD"],
+                ["Model", "LM_LSTM_VarDropWT"],
+                [
+                    "Optimizer",
+                    f"NT-AvSGD (Trigger={AVG_TRIGGER_THRESHOLD})",
+                ],  # !! Aggiornato !!
+                ["Base Optimizer", "SGD"],  # Specifichiamo l'ottimizzatore sottostante
                 ["Current Learning Rate", lr],
                 ["Current Batch Size", batch_size],
-                ["Embedding Size", emb],  # Riflette la modifica emb=hid
+                ["Embedding Size", emb],
                 ["Hidden Size", hid],
+                ["Weight Tying", True],
+                ["Dropout Embedding (Var)", dropoute_rate],
+                ["Dropout Output (Var)", dropouto_rate],
                 ["Gradient Clip", clip],
                 ["Max Epochs", n_epochs],
-                ["Patience", patience_setting],
+                ["Patience (Early Stop)", patience_setting],
             ]
             print("\n--- Current Run Configuration ---")
             print(
@@ -139,63 +149,133 @@ if __name__ == "__main__":
 
             # --- 4.4. Inizializzazione Modello, Ottimizzatore, Loss ---
             print("\nInitializing Model, Optimizer, and Loss for this run...")
-            # !! Istanzia il modello con Weight Tying !!
-            model = LM_LSTM_WeightTying(
-                emb_size=emb,  # Usa la dimensione aggiornata
+            model = LM_LSTM_VarDropWT(
+                emb_size=emb,
                 hidden_size=hid,
                 output_size=vocab_len,
                 pad_index=lang.word2id["<pad>"],
+                dropoute=dropoute_rate,
+                dropouto=dropouto_rate,
             ).to(DEVICE)
-            # NOTA: l'inizializzazione pesi di init_weights funziona anche qui.
-            # Inizializzerà i pesi dell'embedding e quelli dell'LSTM separatamente.
-            # I pesi dell'output layer sono *già* impostati per essere gli stessi dell'embedding.
             model.apply(init_weights)
 
-            # Usa SGD
+            # Ottimizzatore base SGD
             optimizer = optim.SGD(model.parameters(), lr=lr)
             criterion_train = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"])
             criterion_eval = nn.CrossEntropyLoss(
                 ignore_index=lang.word2id["<pad>"], reduction="sum"
             )
 
-            # --- 4.5. Training Loop Specifico della Run ---
-            print("\n--- Starting Training for this configuration ---")
-            patience = patience_setting
+            # --- 4.5. Training Loop Specifico della Run con NT-AvSGD ---
+            print(
+                "\n--- Starting Training for this configuration (with NT-AvSGD logic) ---"
+            )
+            patience = patience_setting  # Per early stopping standard
+            avg_trigger_countdown = AVG_TRIGGER_THRESHOLD  # Per attivare AvSGD
+            is_averaging = False  # Flag per stato AvSGD
+            avg_model = None  # Placeholder per modello mediato
+            avg_step_count = 0  # Contatore step mediati
+            best_ppl_for_avg_trigger = math.inf  # Miglior PPL per triggerare
+            trigger_epoch = -1  # Epoca in cui si attiva l'averaging
+
             sampled_epochs = []
             losses_train = []
             losses_dev = []
             ppls_dev = []
-            best_dev_ppl = math.inf
-            best_model = None
+            best_dev_ppl = math.inf  # Miglior PPL (potrebbe essere da avg_model)
+            best_model_state_dict = (
+                None  # Salva lo state_dict del modello migliore (avg o non avg)
+            )
+
             pbar = tqdm(
                 range(1, n_epochs + 1),
-                desc=f"Run {current_run} (lr={lr}, bs={batch_size}, SGD+WT)",  # Aggiornato desc
+                desc=f"Run {current_run} (lr={lr}, bs={batch_size}, NT-AvSGD)",
                 leave=False,
             )
-            # ... (loop epoche identico) ...
             for epoch in pbar:
+                # --- Training Step (usa sempre 'model' e 'optimizer' base) ---
                 train_loss = train_loop(
                     train_loader, optimizer, criterion_train, model, clip=clip
                 )
-                ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
-                pbar.set_description(
-                    f"Epoch {epoch}/{n_epochs} -> Dev PPL: {ppl_dev:.3f} | Train Loss: {train_loss:.3f}"
-                )
-                sampled_epochs.append(epoch)
                 losses_train.append(train_loss)
-                losses_dev.append(loss_dev)
-                ppls_dev.append(ppl_dev)
-                if ppl_dev < best_dev_ppl:
-                    best_dev_ppl = ppl_dev
-                    best_model = copy.deepcopy(model).to("cpu")
-                    patience = patience_setting
-                    pbar.set_postfix_str("✨ New Best Model!")
+
+                # --- Averaging Update (se attivo) ---
+                if is_averaging:
+                    avg_step_count += 1
+                    # Aggiorna i parametri del modello mediato
+                    # Usiamo to('cpu') per sicurezza memoria GPU, ma potrebbe rallentare
+                    with torch.no_grad():
+                        for avg_param, param in zip(
+                            avg_model.parameters(), model.parameters()
+                        ):
+                            avg_param.data.add_(
+                                param.data.to(avg_param.device) - avg_param.data,
+                                alpha=1.0 / avg_step_count,
+                            )
+
+                # --- Evaluation Step ---
+                # Se stiamo facendo averaging, valutiamo con avg_model, altrimenti con model
+                eval_model_ref = avg_model if is_averaging else model
+                eval_model_ref.to(DEVICE)  # Assicura che sia sul device giusto
+                ppl_dev_current_epoch, loss_dev_current_epoch = eval_loop(
+                    dev_loader, criterion_eval, eval_model_ref
+                )
+                if is_averaging:
+                    eval_model_ref.to("cpu")  # Sposta indietro avg_model se era su CPU
+
+                losses_dev.append(loss_dev_current_epoch)
+                ppls_dev.append(ppl_dev_current_epoch)
+                sampled_epochs.append(epoch)
+
+                pbar.set_description(
+                    f"Epoch {epoch}/{n_epochs} -> Dev PPL: {ppl_dev_current_epoch:.3f} | Train Loss: {train_loss:.3f}"
+                )
+
+                # --- Logica NT-AvSGD Trigger & Early Stopping ---
+                avg_triggered_this_epoch = False
+                if ppl_dev_current_epoch < best_ppl_for_avg_trigger:
+                    # Miglioramento PPL (resetta countdown per trigger)
+                    best_ppl_for_avg_trigger = ppl_dev_current_epoch
+                    avg_trigger_countdown = AVG_TRIGGER_THRESHOLD
+                    pbar.set_postfix_str(f"PPL Imp.->AvgTrig Reset")
+                elif not is_averaging:
+                    # Non miglioramento E non stiamo ancora facendo averaging
+                    avg_trigger_countdown -= 1
+                    pbar.set_postfix_str(
+                        f"AvgTrig: {avg_trigger_countdown}/{AVG_TRIGGER_THRESHOLD}"
+                    )
+                    if avg_trigger_countdown <= 0:
+                        print(
+                            f"\n--- NT-AvSGD Triggered at epoch {epoch}! Starting weight averaging. ---"
+                        )
+                        is_averaging = True
+                        trigger_epoch = epoch
+                        # Inizializza avg_model come copia del modello *corrente*
+                        avg_model = copy.deepcopy(model).to("cpu")  # Inizia su CPU
+                        avg_step_count = (
+                            1  # Primo step di averaging sarà il prossimo aggiornamento
+                        )
+
+                # Logica per Early Stopping standard e salvataggio miglior modello
+                # Confrontiamo sempre con best_dev_ppl (che tiene traccia del migliore finora, avg o non avg)
+                if ppl_dev_current_epoch < best_dev_ppl:
+                    best_dev_ppl = ppl_dev_current_epoch
+                    # Salva lo *state dict* del modello che ha dato la best PPL
+                    # Se is_averaging, salva avg_model, altrimenti model
+                    model_to_save = avg_model if is_averaging else model
+                    best_model_state_dict = copy.deepcopy(model_to_save.state_dict())
+                    patience = patience_setting  # Resetta pazienza early stopping
+                    pbar.set_postfix_str(
+                        f"✨ New Best PPL! AvgTrig:{avg_trigger_countdown}"
+                    )
                 else:
                     patience -= 1
-                    pbar.set_postfix_str(f"Patience: {patience}/{patience_setting}")
+                    pbar.set_postfix_str(
+                        f"Patience: {patience}/{patience_setting} AvgTrig:{avg_trigger_countdown}"
+                    )
                     if patience <= 0:
                         print(
-                            f"\nEarly stopping triggered at epoch {epoch} for this run."
+                            f"\nStandard Early stopping triggered at epoch {epoch} for this run."
                         )
                         break
             pbar.close()
@@ -222,24 +302,43 @@ if __name__ == "__main__":
             final_test_ppl = math.inf
             epochs_trained = 0
             best_epoch_num = None
+            final_model_to_eval = None  # Modello da usare per il test set
+
             if sampled_epochs:
                 epochs_trained = sampled_epochs[-1]
                 if best_dev_ppl != math.inf:
+                    # Trova l'epoca corrispondente alla best_dev_ppl salvata
                     best_epoch_num = sampled_epochs[ppls_dev.index(best_dev_ppl)]
 
-            if best_model is not None:
-                print("\nEvaluating best model on Test Set for this run...")
-                best_model.to(DEVICE)
-                final_test_ppl, _ = eval_loop(test_loader, criterion_eval, best_model)
+            # Determina quale modello usare per la valutazione finale
+            if best_model_state_dict is not None:
+                print("\nLoading best model state for final evaluation...")
+                # Ricrea l'architettura e carica lo state_dict salvato
+                final_model_to_eval = LM_LSTM_VarDropWT(
+                    emb_size=emb,
+                    hidden_size=hid,
+                    output_size=vocab_len,
+                    pad_index=lang.word2id["<pad>"],
+                    dropoute=dropoute_rate,
+                    dropouto=dropouto_rate,
+                ).to(DEVICE)
+                final_model_to_eval.load_state_dict(best_model_state_dict)
+                final_model_to_eval.eval()  # Metti in modalità valutazione
+
+                print("Evaluating best model on Test Set for this run...")
+                final_test_ppl, _ = eval_loop(
+                    test_loader, criterion_eval, final_model_to_eval
+                )
                 print(f"Final Test PPL for this run: {final_test_ppl:.3f}")
 
                 print("\nSaving final results to TXT for this run...")
                 results_summary = (
-                    # !! Aggiorna nome step !!
-                    f"Experiment: {experiment_name} (Step B1: LSTM + SGD + WeightTying)\n"
+                    f"Experiment: {experiment_name} (Step B3: LSTM + NT-AvSGD + WT + VarDrop)\n"
                     f"Configuration: {hyperparam_str}\n"
-                    f"Optimizer: SGD\n"
-                    f"Model Features: Weight Tying\n"  # Aggiunto dettaglio
+                    f"Optimizer: NT-AvSGD (Base: SGD, Trigger={AVG_TRIGGER_THRESHOLD})\n"
+                    f"Model Features: Weight Tying, Variational Dropout\n"
+                    f"Dropout Rates (Emb/Out): {dropoute_rate}/{dropouto_rate}\n"
+                    f"Averaging Triggered: {'Yes (at epoch ' + str(trigger_epoch) + ')' if trigger_epoch != -1 else 'No'}\n"  # Indica se triggerato
                     f"-------------------------------------\n"
                     f"Best Development PPL: {best_dev_ppl:.4f}\n"
                     f"Final Test PPL: {final_test_ppl:.4f}\n"
@@ -255,8 +354,12 @@ if __name__ == "__main__":
                 run_summary_dict = {
                     "learning_rate": lr,
                     "batch_size": batch_size,
-                    "optimizer": "SGD",
-                    "weight_tying": True,  # Aggiunto flag
+                    "optimizer": f"NT-AvSGD(T={AVG_TRIGGER_THRESHOLD})",  # Aggiornato
+                    "weight_tying": True,
+                    "var_dropout_e": dropoute_rate,
+                    "var_dropout_o": dropouto_rate,
+                    "avg_triggered": trigger_epoch != -1,  # Boolean se triggerato
+                    "trigger_epoch": trigger_epoch if trigger_epoch != -1 else None,
                     "best_dev_ppl": best_dev_ppl,
                     "final_test_ppl": final_test_ppl,
                     "epochs_trained": epochs_trained,
@@ -264,16 +367,20 @@ if __name__ == "__main__":
                 }
                 all_run_results.append(run_summary_dict)
 
-            else:
+            else:  # Caso in cui non si è salvato neanche un modello
                 print(
-                    "\nNo best model found for this run. Skipping final evaluation and TXT saving."
+                    "\nNo best model state found for this run. Skipping final evaluation and TXT saving."
                 )
                 # Aggiungi placeholder
                 run_summary_dict = {
                     "learning_rate": lr,
                     "batch_size": batch_size,
-                    "optimizer": "SGD",
-                    "weight_tying": True,  # Aggiunto flag
+                    "optimizer": f"NT-AvSGD(T={AVG_TRIGGER_THRESHOLD})",
+                    "weight_tying": True,
+                    "var_dropout_e": dropoute_rate,
+                    "var_dropout_o": dropouto_rate,
+                    "avg_triggered": False,
+                    "trigger_epoch": None,
                     "best_dev_ppl": math.inf,
                     "final_test_ppl": math.inf,
                     "epochs_trained": epochs_trained,
@@ -292,6 +399,7 @@ if __name__ == "__main__":
                         "Warning: Style 'seaborn-v0_8-darkgrid' not found. Using default style."
                     )
                     pass
+
                 # Grafico 1: Loss
                 plt.figure(figsize=(10, 6))
                 plt.plot(
@@ -308,11 +416,18 @@ if __name__ == "__main__":
                     marker="x",
                     linestyle="--",
                 )
+                # Aggiungi linea verticale per trigger AvSGD
+                if trigger_epoch != -1:
+                    plt.axvline(
+                        x=trigger_epoch,
+                        color="r",
+                        linestyle="--",
+                        label=f"AvSGD Trigger (Epoch {trigger_epoch})",
+                    )
                 plt.xlabel("Epochs")
                 plt.ylabel("Cross-Entropy Loss")
-                # !! Aggiorna titolo !!
                 plt.title(
-                    f"Training vs Development Loss\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, SGD+WT)"
+                    f"Training vs Development Loss\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, NT-AvSGD)"
                 )
                 plt.legend()
                 loss_plot_path = os.path.join(output_dir, "loss_vs_epochs.png")
@@ -330,11 +445,18 @@ if __name__ == "__main__":
                     linestyle="-",
                     color="red",
                 )
+                # Aggiungi linea verticale per trigger AvSGD
+                if trigger_epoch != -1:
+                    plt.axvline(
+                        x=trigger_epoch,
+                        color="r",
+                        linestyle="--",
+                        label=f"AvSGD Trigger (Epoch {trigger_epoch})",
+                    )
                 plt.xlabel("Epochs")
                 plt.ylabel("Perplexity (PPL)")
-                # !! Aggiorna titolo !!
                 plt.title(
-                    f"Development Perplexity over Epochs\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, SGD+WT)"
+                    f"Development Perplexity over Epochs\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, NT-AvSGD)"
                 )
                 if best_dev_ppl != math.inf:
                     plt.scatter(
@@ -350,13 +472,16 @@ if __name__ == "__main__":
                 plt.savefig(ppl_plot_path)
                 plt.close()
                 print(f"Perplexity plot saved to: {ppl_plot_path}")
-
             else:
                 print("\nNo epochs completed for this run, skipping plot generation.")
 
             # --- 4.9. Stampa Finale Risultati della Run su Terminale ---
             print(f"\n--- Summary for Run {current_run} (lr={lr}, bs={batch_size}) ---")
             final_results_data = [
+                [
+                    "Averaging Triggered",
+                    f"{'Yes (Epoch ' + str(trigger_epoch) + ')' if trigger_epoch != -1 else 'No'}",
+                ],
                 [
                     "Best Development PPL",
                     f"{best_dev_ppl:.4f}" if best_dev_ppl != math.inf else "N/A",
@@ -415,7 +540,6 @@ if __name__ == "__main__":
             heatmap_data_dev = summary_df.pivot(
                 index="learning_rate", columns="batch_size", values="best_dev_ppl"
             )
-
             plt.figure(figsize=(10, 7))
             sns.heatmap(
                 heatmap_data_dev,
@@ -426,7 +550,9 @@ if __name__ == "__main__":
                 cbar_kws={"label": "Best Development PPL"},
             )
             # !! Aggiorna titolo !!
-            plt.title(f"Best Development PPL Heatmap ({experiment_name}: LSTM+SGD+WT)")
+            plt.title(
+                f"Best Development PPL Heatmap ({experiment_name}: LSTM+NTAvSGD+WT+VarDrop)"
+            )
             plt.xlabel("Batch Size")
             plt.ylabel("Learning Rate")
             heatmap_dev_path = os.path.join(
@@ -435,7 +561,6 @@ if __name__ == "__main__":
             plt.savefig(heatmap_dev_path)
             plt.close()
             print(f"Development PPL heatmap saved to: {heatmap_dev_path}")
-
         except Exception as e:
             print(f"Could not generate Dev PPL heatmap: {e}")
 
@@ -447,7 +572,6 @@ if __name__ == "__main__":
             heatmap_data_test = summary_df.pivot(
                 index="learning_rate", columns="batch_size", values="final_test_ppl"
             )
-
             plt.figure(figsize=(10, 7))
             sns.heatmap(
                 heatmap_data_test,
@@ -458,7 +582,9 @@ if __name__ == "__main__":
                 cbar_kws={"label": "Final Test PPL"},
             )
             # !! Aggiorna titolo !!
-            plt.title(f"Final Test PPL Heatmap ({experiment_name}: LSTM+SGD+WT)")
+            plt.title(
+                f"Final Test PPL Heatmap ({experiment_name}: LSTM+NTAvSGD+WT+VarDrop)"
+            )
             plt.xlabel("Batch Size")
             plt.ylabel("Learning Rate")
             heatmap_test_path = os.path.join(
@@ -467,7 +593,6 @@ if __name__ == "__main__":
             plt.savefig(heatmap_test_path)
             plt.close()
             print(f"Test PPL heatmap saved to: {heatmap_test_path}")
-
         except Exception as e:
             print(f"Could not generate Test PPL heatmap: {e}")
 

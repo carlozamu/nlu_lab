@@ -1,0 +1,9 @@
+Experiment: puntoB1_WeightTying (Step B1: LSTM + SGD + WeightTying)
+Configuration: lr_0.0005_bs_16_emb_300_hid_300_WeightTying
+Optimizer: SGD
+Model Features: Weight Tying
+-------------------------------------
+Best Development PPL: 782.6851
+Final Test PPL: 758.9170
+Total Epochs Trained: 100
+Achieved Best Dev PPL at Epoch: 100
