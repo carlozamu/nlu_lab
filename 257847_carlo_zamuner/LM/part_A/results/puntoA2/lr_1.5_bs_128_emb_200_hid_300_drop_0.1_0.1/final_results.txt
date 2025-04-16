@@ -1,0 +1,9 @@
+Experiment: puntoA2 (Step 2: LSTM + Dropout + SGD)
+Configuration: lr_1.5_bs_128_emb_200_hid_300_drop_0.1_0.1
+-------------------------------------
+Best Development PPL: 129.1585
+Final Test PPL: 124.8125
+Total Epochs Trained: 71
+Achieved Best Dev PPL at Epoch: 68
+Embedding Dropout Rate: 0.1
+FC Dropout Rate: 0.1
