@@ -1,0 +1,11 @@
+Experiment: puntoB3_NTAvSGD (Step B3: LSTM + NT-AvSGD + WT + VarDrop)
+Configuration: lr_1.5_bs_16_emb_300_hid_300_VarDropWT_e0.1_o0.4_NTAvSGD5
+Optimizer: NT-AvSGD (Base: SGD, Trigger=5)
+Model Features: Weight Tying, Variational Dropout
+Dropout Rates (Emb/Out): 0.1/0.4
+Averaging Triggered: No
+-------------------------------------
+Best Development PPL: 99.4023
+Final Test PPL: 97.2414
+Total Epochs Trained: 31
+Achieved Best Dev PPL at Epoch: 28
