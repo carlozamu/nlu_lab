@@ -1,5 +1,4 @@
-# Add the class of your model only
-# Here is where you define the architecture of your model using pytorch
+# functions.py - Aggiornato per gestire output a tupla dal modello
 
 import torch
 import torch.nn as nn
@@ -14,15 +13,25 @@ def train_loop(data, optimizer, criterion, model, clip=5):
     number_of_tokens = []
 
     for sample in data:
-        optimizer.zero_grad()  # Zeroing the gradient
-        output = model(sample["source"])
-        loss = criterion(output, sample["target"])
+        optimizer.zero_grad()
+        # --- MODIFICA QUI ---
+        # Chiama il modello e ottieni l'output (potrebbe essere una tupla)
+        model_output = model(sample["source"])
+        # Estrai solo le predizioni (il primo elemento)
+        # Se il modello restituisce solo un tensore, questo non cambia nulla
+        predictions = (
+            model_output[0] if isinstance(model_output, tuple) else model_output
+        )
+        # ------------------
+
+        loss = criterion(
+            predictions, sample["target"]
+        )  # Usa solo le predizioni per la loss
         loss_array.append(loss.item() * sample["number_tokens"])
         number_of_tokens.append(sample["number_tokens"])
-        loss.backward()  # Compute the gradient, deleting the computational graph
-        # clip the gradient to avoid exploding gradients
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        optimizer.step()  # Update the weights
+        optimizer.step()
 
     return sum(loss_array) / sum(number_of_tokens)
 
@@ -32,11 +41,20 @@ def eval_loop(data, eval_criterion, model):
     loss_to_return = []
     loss_array = []
     number_of_tokens = []
-    # softmax = nn.Softmax(dim=1) # Use Softmax if you need the actual probability
-    with torch.no_grad():  # It used to avoid the creation of computational graph
+    with torch.no_grad():
         for sample in data:
-            output = model(sample["source"])
-            loss = eval_criterion(output, sample["target"])
+            # --- MODIFICA QUI ---
+            # Chiama il modello e ottieni l'output (potrebbe essere una tupla)
+            model_output = model(sample["source"])
+            # Estrai solo le predizioni (il primo elemento)
+            predictions = (
+                model_output[0] if isinstance(model_output, tuple) else model_output
+            )
+            # ------------------
+
+            loss = eval_criterion(
+                predictions, sample["target"]
+            )  # Usa solo le predizioni per la loss
             loss_array.append(loss.item())
             number_of_tokens.append(sample["number_tokens"])
 
@@ -46,6 +64,7 @@ def eval_loop(data, eval_criterion, model):
 
 
 def init_weights(mat):
+    # ... (codice init_weights invariato) ...
     for m in mat.modules():
         if type(m) in [nn.GRU, nn.LSTM, nn.RNN]:
             for name, param in m.named_parameters():

@@ -39,7 +39,7 @@ if __name__ == "__main__":
     )  # Cartella principale per B3
 
     # Liste di iperparametri da testare (usiamo quelle di A1/B1/B2)
-    learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.1]
+    learning_rates = [0.05, 0.1, 0.5, 1, 1.5, 2]
     batch_sizes = [16, 32, 64, 128]
 
     # Parametri fissi
