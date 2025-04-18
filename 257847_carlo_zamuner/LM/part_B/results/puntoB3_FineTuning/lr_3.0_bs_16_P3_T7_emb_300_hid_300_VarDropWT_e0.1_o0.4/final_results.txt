@@ -1,0 +1,12 @@
+Experiment: puntoB3_FineTuning
+Configuration: lr_3.0_bs_16_P3_T7_emb_300_hid_300_VarDropWT_e0.1_o0.4
+Optimizer: NT-AvSGD (Base: SGD, Trigger=7)
+Patience (Early Stop): 3
+Model Features: WT, VarDrop
+Dropout Rates (Emb/Out): 0.1/0.4
+Averaging Triggered: No
+-------------------------------------
+Best Dev PPL: 99.7995
+Final Test PPL: 97.2538
+Total Epochs Trained: 16
+Best Dev PPL at Epoch: 13

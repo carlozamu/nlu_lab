@@ -7,6 +7,7 @@ import numpy as np
 
 
 # Helper Class: Locked Dropout (Variational Dropout per attivazioni)
+# Variational Dropout di Gal & Ghahramani (2016) / Sez 4.2
 class LockedDropout(nn.Module):
     """
     Applica lo stesso dropout mask a tutti i timestep.
