@@ -1,87 +1,93 @@
-# functions.py - Aggiornato per gestire output a tupla dal modello
-
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 import math
 
 
-def train_loop(data, optimizer, criterion, model, clip=5):
+# Esegue un'epoca di addestramento
+def train_loop(data_loader, optimizer, criterion_train, model, clip_value=5):
+    """Addestra il modello per un'epoca."""
     model.train()
-    loss_array = []
-    number_of_tokens = []
+    total_loss = 0
+    total_tokens = 0
 
-    for sample in data:
+    for batch in data_loader:
         optimizer.zero_grad()
-        # --- MODIFICA QUI ---
-        # Chiama il modello e ottieni l'output (potrebbe essere una tupla)
-        model_output = model(sample["source"])
-        # Estrai solo le predizioni (il primo elemento)
-        # Se il modello restituisce solo un tensore, questo non cambia nulla
-        predictions = (
-            model_output[0] if isinstance(model_output, tuple) else model_output
-        )
-        # ------------------
+        predictions_raw, *_ = model(batch["source"])  # Gestisce output tupla/tensore
+        vocab_size = predictions_raw.size(1)
+        predictions_flat = predictions_raw.permute(0, 2, 1).reshape(-1, vocab_size)
+        target_flat = batch["target"].reshape(-1)
 
-        loss = criterion(
-            predictions, sample["target"]
-        )  # Usa solo le predizioni per la loss
-        loss_array.append(loss.item() * sample["number_tokens"])
-        number_of_tokens.append(sample["number_tokens"])
+        loss = criterion_train(predictions_flat, target_flat)
+        # Usa number_tokens per ponderare correttamente la loss media
+        if criterion_train.reduction == "mean":
+            weighted_loss = loss.item() * batch["number_tokens"]
+        else:
+            print(
+                "Warning: criterion_train reduction is not 'mean'. Loss averaging might be approximate."
+            )
+            weighted_loss = loss.item()
+
+        total_loss += weighted_loss
+        total_tokens += batch["number_tokens"]
+
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
         optimizer.step()
 
-    return sum(loss_array) / sum(number_of_tokens)
+    if total_tokens == 0:
+        return 0.0
+    return total_loss / total_tokens
 
 
-def eval_loop(data, eval_criterion, model):
+# Esegue la valutazione (calcola PPL e loss media)
+def eval_loop(data_loader, criterion_eval, model):
+    """Valuta il modello su un dataset (PPL e loss)."""
     model.eval()
-    loss_to_return = []
-    loss_array = []
-    number_of_tokens = []
+    total_loss = 0
+    total_tokens = 0
+
     with torch.no_grad():
-        for sample in data:
-            # --- MODIFICA QUI ---
-            # Chiama il modello e ottieni l'output (potrebbe essere una tupla)
-            model_output = model(sample["source"])
-            # Estrai solo le predizioni (il primo elemento)
-            predictions = (
-                model_output[0] if isinstance(model_output, tuple) else model_output
-            )
-            # ------------------
+        for batch in data_loader:
+            predictions_raw, *_ = model(batch["source"])
+            vocab_size = predictions_raw.size(1)
+            predictions_flat = predictions_raw.permute(0, 2, 1).reshape(-1, vocab_size)
+            target_flat = batch["target"].reshape(-1)
 
-            loss = eval_criterion(
-                predictions, sample["target"]
-            )  # Usa solo le predizioni per la loss
-            loss_array.append(loss.item())
-            number_of_tokens.append(sample["number_tokens"])
+            loss = criterion_eval(predictions_flat, target_flat)  # reduction='sum'
+            total_loss += loss.item()
+            total_tokens += batch["number_tokens"]
 
-    ppl = math.exp(sum(loss_array) / sum(number_of_tokens))
-    loss_to_return = sum(loss_array) / sum(number_of_tokens)
-    return ppl, loss_to_return
+    if total_tokens == 0:
+        return float("inf"), float("inf")
+    avg_loss = total_loss / total_tokens
+    try:
+        ppl = math.exp(avg_loss)
+    except OverflowError:
+        ppl = float("inf")
+    return ppl, avg_loss
 
 
-def init_weights(mat):
-    # ... (codice init_weights invariato) ...
-    for m in mat.modules():
-        if type(m) in [nn.GRU, nn.LSTM, nn.RNN]:
-            for name, param in m.named_parameters():
-                if "weight_ih" in name:
-                    for idx in range(4):
-                        mul = param.shape[0] // 4
-                        torch.nn.init.xavier_uniform_(
-                            param[idx * mul : (idx + 1) * mul]
-                        )
-                elif "weight_hh" in name:
-                    for idx in range(4):
-                        mul = param.shape[0] // 4
-                        torch.nn.init.orthogonal_(param[idx * mul : (idx + 1) * mul])
-                elif "bias" in name:
-                    param.data.fill_(0)
-        else:
-            if type(m) in [nn.Linear]:
-                torch.nn.init.uniform_(m.weight, -0.01, 0.01)
-                if m.bias != None:
-                    m.bias.data.fill_(0.01)
+# Inizializza i pesi del modello (per usare con model.apply)
+def init_weights(m):
+    """Inizializza pesi per modulo: Emb Unif[-0.1,0.1], LSTM Xavier/Ortho, Linear Unif."""
+    EMB_INIT_RANGE = 0.1
+    LINEAR_INIT_RANGE = 0.01
+    classname = m.__class__.__name__
+
+    if isinstance(m, nn.Embedding):
+        nn.init.uniform_(m.weight, -EMB_INIT_RANGE, EMB_INIT_RANGE)
+        if m.padding_idx is not None:
+            with torch.no_grad():
+                m.weight[m.padding_idx].fill_(0)
+    elif isinstance(m, nn.LSTM):
+        for name, param in m.named_parameters():
+            if "weight_ih" in name:
+                nn.init.xavier_uniform_(param.data)
+            elif "weight_hh" in name:
+                nn.init.orthogonal_(param.data)
+            elif "bias" in name:
+                param.data.fill_(0)
+    elif isinstance(m, nn.Linear):
+        nn.init.uniform_(m.weight, -LINEAR_INIT_RANGE, LINEAR_INIT_RANGE)
+        if m.bias is not None:
+            nn.init.uniform_(m.bias, -LINEAR_INIT_RANGE, LINEAR_INIT_RANGE)

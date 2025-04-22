@@ -1,12 +1,5 @@
-# Questo script esegue l'esperimento corrispondente al Punto 3 della Part 1.A:
-# - Utilizza LSTM (dal Punto 1).
-# - Utilizza due layer di Dropout (dal Punto 2).
-# - SOSTITUISCE SGD con AdamW (Punto 3).
-# - ITERA su diverse combinazioni di Learning Rate e Batch Size.
-# - Salva risultati (CSV, PNG, TXT) per OGNI combinazione.
-# - ALLA FINE, aggrega i risultati e crea grafici comparativi.
+# Esegue la configurazione A3 migliore (LSTM+Dropout+AdamW) e salva il modello.
 
-# --- Import Standard e PyTorch ---
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,482 +8,152 @@ import math
 import copy
 from functools import partial
 import os
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns  # Per heatmap
-from tqdm import tqdm
-from tabulate import tabulate
 
-# --- Import Moduli Custom ---
+from tqdm import tqdm
+
 from functions import train_loop, eval_loop, init_weights
 from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
-
-# !! Importa il modello con Dropout (lo stesso dello Step 2) !!
-from model import LM_LSTM_With_Dropout
+from model import LM_LSTM_With_Dropout  # Modello per A3
 
 if __name__ == "__main__":
-    # --- 1. Impostazioni Globali e Liste Iperparametri ---
+    # --- Impostazioni ---
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"Global settings: Using device: {DEVICE}")
+    print(f"Device: {DEVICE}")
 
-    # !! Nome Esperimento per Step 3 !!
-    experiment_name = "puntoA3"
-    main_output_folder = os.path.join(
-        "results", experiment_name
-    )  # Cartella principale per A3
+    experiment_step = "Part1A_Step3_Best"
+    model_save_dir = "bin"  # Cartella per salvataggio
 
-    # Liste di iperparametri da testare
-
-    learning_rates = [
-        0.0001,
-        0.001,
-        0.01,
-        0.1,
-        1.0,
-        1.5,
-    ]
-    batch_sizes = [16, 32, 64, 128]
-
-    # Parametri fissi
+    # --- Parametri Fissi Configurazione Migliore A3 ---
+    lr = 0.001
+    batch_size = 16
     hid = 300
     emb = 200
     clip = 5
     n_epochs = 100
     patience_setting = 3
-    # Tassi di Dropout fissi (come nello Step 2)
     emb_dropout_rate = 0.1
     fc_dropout_rate = 0.1
 
-    # --- 2. Caricamento Dati e Vocabolario (una sola volta) ---
-    print("\nLoading data and building vocabulary (once)...")
-    train_raw = read_file("./dataset/PennTreeBank/ptb.train.txt")
-    dev_raw = read_file("./dataset/PennTreeBank/ptb.valid.txt")
-    test_raw = read_file("./dataset/PennTreeBank/ptb.test.txt")
-    vocab = get_vocab(train_raw, ["<pad>", "<eos>"])
-    lang = Lang(train_raw, ["<pad>", "<eos>"])
-    vocab_len = len(lang.word2id)
+    # --- Dati ---
+    print("\nLoading data & vocabulary...")
+    try:
+        train_raw = read_file("./dataset/PennTreeBank/ptb.train.txt")
+        dev_raw = read_file("./dataset/PennTreeBank/ptb.valid.txt")
+        test_raw = read_file("./dataset/PennTreeBank/ptb.test.txt")
+        lang = Lang(train_raw, ["<pad>", "<eos>"])
+        vocab_len = len(lang.word2id)
+        pad_token_id = lang.word2id["<pad>"]  # per collate_fn
+        print("Data loaded.")
+    except FileNotFoundError as e:
+        print(f"Errore: Dataset non trovato: {e}")
+        exit()
 
-    # --- 3. Creazione Dataset (una sola volta) ---
-    print("Creating Datasets (once)...")
+    print("Creating Datasets...")
     train_dataset = PennTreeBank(train_raw, lang)
     dev_dataset = PennTreeBank(dev_raw, lang)
     test_dataset = PennTreeBank(test_raw, lang)
+    print("Datasets created.")
 
-    # --- 4. Loop sugli Iperparametri ---
-    print("\n--- Starting Hyperparameter Tuning Loop ---")
-    total_runs = len(learning_rates) * len(batch_sizes)
-    current_run = 0
-    all_run_results = []  # Lista per raccogliere i risultati di ogni run
+    # --- Esecuzione ---
+    print(f"\n--- Running Configuration: {experiment_step} ---")
+    print(f"   LR={lr}, BS={batch_size}, Optim=AdamW")
 
-    for lr in learning_rates:
-        for batch_size in batch_sizes:
-            current_run += 1
-            print(f"\n===== RUN {current_run}/{total_runs} =====")
-            print(
-                f"Configuration: lr={lr}, batch_size={batch_size}, emb_drop={emb_dropout_rate}, fc_drop={fc_dropout_rate}, optimizer=AdamW"
-            )  #!! Aggiunto optimizer
+    # --- DataLoader ---
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=partial(
+            collate_fn, pad_token=pad_token_id, DEVICE=DEVICE
+        ),  # Usa 'pad_token' come nell'originale utils.py
+        drop_last=True,
+    )
+    dev_loader = DataLoader(
+        dev_dataset,
+        batch_size=batch_size * 2,
+        collate_fn=partial(
+            collate_fn, pad_token=pad_token_id, DEVICE=DEVICE
+        ),  # Usa 'pad_token'
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size * 2,
+        collate_fn=partial(
+            collate_fn, pad_token=pad_token_id, DEVICE=DEVICE
+        ),  # Usa 'pad_token'
+    )
 
-            # --- 4.1. Configurazione Specifica della Run ---
-            # Il nome della cartella solitamente non include l'ottimizzatore, ma lo aggiungiamo nel TXT/stampe
-            hyperparam_str = f"lr_{lr}_bs_{batch_size}_emb_{emb}_hid_{hid}_drop_{emb_dropout_rate}_{fc_dropout_rate}"
-            output_dir = os.path.join(
-                main_output_folder, hyperparam_str
-            )  # Usa cartella principale A3
-            os.makedirs(output_dir, exist_ok=True)
-            print(f"Output directory for this run: {output_dir}")
+    # --- Modello, Optimizer, Loss ---
+    print("Initializing Model, Optimizer, Loss...")
+    model = LM_LSTM_With_Dropout(
+        emb_size=emb,
+        hidden_size=hid,
+        output_size=vocab_len,
+        pad_index=pad_token_id,  # Passa l'ID di padding
+        emb_dropout=emb_dropout_rate,
+        fc_dropout=fc_dropout_rate,
+    ).to(DEVICE)
+    model.apply(init_weights)  # Applica init originale
 
-            # --- 4.2. Creazione DataLoader ---
-            print("Creating DataLoaders for current batch size...")
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                collate_fn=partial(
-                    collate_fn, pad_token=lang.word2id["<pad>"], DEVICE=DEVICE
-                ),
-                drop_last=True,
-            )
-            dev_loader = DataLoader(
-                dev_dataset,
-                batch_size=batch_size * 2,
-                collate_fn=partial(
-                    collate_fn, pad_token=lang.word2id["<pad>"], DEVICE=DEVICE
-                ),
-            )
-            test_loader = DataLoader(
-                test_dataset,
-                batch_size=batch_size * 2,
-                collate_fn=partial(
-                    collate_fn, pad_token=lang.word2id["<pad>"], DEVICE=DEVICE
-                ),
-            )
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    criterion_train = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    criterion_eval = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction="sum")
 
-            # --- 4.3. Stampa Configurazione della Run ---
-            exp_params = [
-                # !! Aggiorna nome step e ottimizzatore !!
-                [
-                    "Experiment Step",
-                    f"{experiment_name} (Step 3: LSTM + Dropout + AdamW)",
-                ],
-                ["Run", f"{current_run}/{total_runs}"],
-                ["Output Directory", output_dir],
-                ["Device", DEVICE],
-                ["Model", "LM_LSTM_With_Dropout"],
-                ["Optimizer", "AdamW"],  # !! Aggiornato !!
-                ["Current Learning Rate", lr],
-                ["Current Batch Size", batch_size],
-                ["Embedding Size", emb],
-                ["Hidden Size", hid],
-                ["Embedding Dropout", emb_dropout_rate],
-                ["FC Dropout", fc_dropout_rate],
-                ["Gradient Clip", clip],
-                ["Max Epochs", n_epochs],
-                ["Patience", patience_setting],
-            ]
-            print("\n--- Current Run Configuration ---")
-            print(
-                tabulate(exp_params, headers=["Parameter", "Value"], tablefmt="pretty")
-            )
+    # --- Training Loop ---
+    print("Starting Training...")
+    patience = patience_setting
+    best_dev_ppl = math.inf
+    best_model_state_dict = None  # Salva lo state_dict, non il modello intero
 
-            # --- 4.4. Inizializzazione Modello, Ottimizzatore, Loss ---
-            print("\nInitializing Model, Optimizer, and Loss for this run...")
-            # Istanzia il modello con Dropout (come nello Step 2)
-            model = LM_LSTM_With_Dropout(
-                emb_size=emb,
-                hidden_size=hid,
-                output_size=vocab_len,
-                pad_index=lang.word2id["<pad>"],
-                emb_dropout=emb_dropout_rate,
-                fc_dropout=fc_dropout_rate,
-            ).to(DEVICE)
-            model.apply(init_weights)
+    pbar = tqdm(range(1, n_epochs + 1), desc="Epoch", leave=True)
+    for epoch in pbar:
+        # --- Training Step ---
+        # Usa 'clip' come nell'originale functions.py
+        train_loss = train_loop(
+            train_loader, optimizer, criterion_train, model, clip=clip
+        )
 
-            # !! Sostituisci SGD con AdamW !!
-            optimizer = optim.AdamW(model.parameters(), lr=lr)
-            # optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01) # Esempio con weight decay se voluto
+        # --- Evaluation Step ---
+        ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
+        pbar.set_description(f"Epoch {epoch}/{n_epochs} -> Dev PPL: {ppl_dev:.3f}")
 
-            criterion_train = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"])
-            criterion_eval = nn.CrossEntropyLoss(
-                ignore_index=lang.word2id["<pad>"], reduction="sum"
-            )
-
-            # --- 4.5. Training Loop Specifico della Run ---
-            print("\n--- Starting Training for this configuration ---")
+        # --- Early Stopping & Miglior Modello ---
+        if ppl_dev < best_dev_ppl:
+            best_dev_ppl = ppl_dev
+            best_model_state_dict = copy.deepcopy(
+                model.state_dict()
+            )  # Salva state_dict
             patience = patience_setting
-            sampled_epochs = []
-            losses_train = []
-            losses_dev = []
-            ppls_dev = []
-            best_dev_ppl = math.inf
-            best_model = None
-            pbar = tqdm(
-                range(1, n_epochs + 1),
-                desc=f"Run {current_run} (lr={lr}, bs={batch_size}, AdamW)",  #!! Aggiunto AdamW
-                leave=False,
-            )
-            # ... (loop epoche identico a prima) ...
-            for epoch in pbar:
-                train_loss = train_loop(
-                    train_loader, optimizer, criterion_train, model, clip=clip
-                )
-                ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
-                pbar.set_description(
-                    f"Epoch {epoch}/{n_epochs} -> Dev PPL: {ppl_dev:.3f} | Train Loss: {train_loss:.3f}"
-                )
-                sampled_epochs.append(epoch)
-                losses_train.append(train_loss)
-                losses_dev.append(loss_dev)
-                ppls_dev.append(ppl_dev)
-                if ppl_dev < best_dev_ppl:
-                    best_dev_ppl = ppl_dev
-                    best_model = copy.deepcopy(model).to("cpu")
-                    patience = patience_setting
-                    pbar.set_postfix_str("✨ New Best Model!")
-                else:
-                    patience -= 1
-                    pbar.set_postfix_str(f"Patience: {patience}/{patience_setting}")
-                    if patience <= 0:
-                        print(
-                            f"\nEarly stopping triggered at epoch {epoch} for this run."
-                        )
-                        break
-            pbar.close()
-            print("--- Training Finished for this configuration ---")
+        else:
+            patience -= 1
+            if patience <= 0:
+                print(f"\nEarly stopping at epoch {epoch}.")
+                break
+    pbar.close()
+    print("--- Training Finished ---")
 
-            # --- 4.6. Salvataggio Dati CSV (per questa run) ---
-            if sampled_epochs:
-                print(f"\nSaving training metrics to CSV for this run...")
-                results_df = pd.DataFrame(
-                    {
-                        "epoch": sampled_epochs,
-                        "train_loss": losses_train,
-                        "dev_loss": losses_dev,
-                        "dev_perplexity": ppls_dev,
-                    }
-                )
-                csv_path = os.path.join(output_dir, "training_metrics.csv")
-                results_df.to_csv(csv_path, index=False)
-                print(f"Metrics saved to: {csv_path}")
-            else:
-                print("\nNo epochs completed for this run, skipping CSV saving.")
+    # --- Valutazione Finale ---
+    final_test_ppl = math.inf
+    if best_model_state_dict is not None:
+        print("\nEvaluating best model on Test Set...")
+        model.load_state_dict(best_model_state_dict)  # Carica stato migliore
+        model.eval()
+        with torch.no_grad():
+            final_test_ppl, _ = eval_loop(test_loader, criterion_eval, model)
+        print(f"   Best Dev PPL achieved: {best_dev_ppl:.4f}")
+        print(f"   Final Test PPL: {final_test_ppl:.4f}")
 
-            # --- 4.7. Valutazione Finale e Salvataggio Risultati TXT (per questa run) ---
-            final_test_ppl = math.inf
-            epochs_trained = 0
-            best_epoch_num = None
-            if sampled_epochs:
-                epochs_trained = sampled_epochs[-1]
-                if best_dev_ppl != math.inf:
-                    best_epoch_num = sampled_epochs[ppls_dev.index(best_dev_ppl)]
-
-            if best_model is not None:
-                print("\nEvaluating best model on Test Set for this run...")
-                best_model.to(DEVICE)
-                final_test_ppl, _ = eval_loop(test_loader, criterion_eval, best_model)
-                print(f"Final Test PPL for this run: {final_test_ppl:.3f}")
-
-                print("\nSaving final results to TXT for this run...")
-                results_summary = (
-                    # !! Aggiorna nome step !!
-                    f"Experiment: {experiment_name} (Step 3: LSTM + Dropout + AdamW)\n"
-                    f"Configuration: {hyperparam_str}\n"
-                    f"Optimizer: AdamW\n"  # !! Aggiunto Optimizer !!
-                    f"-------------------------------------\n"
-                    f"Best Development PPL: {best_dev_ppl:.4f}\n"
-                    f"Final Test PPL: {final_test_ppl:.4f}\n"
-                    f"Total Epochs Trained: {epochs_trained}\n"
-                    f"Achieved Best Dev PPL at Epoch: {best_epoch_num if best_epoch_num is not None else 'N/A'}\n"
-                    f"Embedding Dropout Rate: {emb_dropout_rate}\n"
-                    f"FC Dropout Rate: {fc_dropout_rate}\n"
-                )
-                results_txt_path = os.path.join(output_dir, "final_results.txt")
-                with open(results_txt_path, "w") as f:
-                    f.write(results_summary)
-                print(f"Results summary saved to: {results_txt_path}")
-
-                # Aggiungi risultati alla lista aggregata
-                run_summary_dict = {
-                    "learning_rate": lr,
-                    "batch_size": batch_size,
-                    "emb_dropout": emb_dropout_rate,
-                    "fc_dropout": fc_dropout_rate,
-                    "optimizer": "AdamW",  # !! Aggiunto Optimizer !!
-                    "best_dev_ppl": best_dev_ppl,
-                    "final_test_ppl": final_test_ppl,
-                    "epochs_trained": epochs_trained,
-                    "best_epoch": best_epoch_num,
-                }
-                all_run_results.append(run_summary_dict)
-
-            else:
-                print(
-                    "\nNo best model found for this run. Skipping final evaluation and TXT saving."
-                )
-                # Aggiungi placeholder se la run fallisce
-                run_summary_dict = {
-                    "learning_rate": lr,
-                    "batch_size": batch_size,
-                    "emb_dropout": emb_dropout_rate,
-                    "fc_dropout": fc_dropout_rate,
-                    "optimizer": "AdamW",  # !! Aggiunto Optimizer !!
-                    "best_dev_ppl": math.inf,
-                    "final_test_ppl": math.inf,
-                    "epochs_trained": epochs_trained,
-                    "best_epoch": None,
-                }
-                all_run_results.append(run_summary_dict)
-
-            # --- 4.8. Generazione e Salvataggio Grafici (per questa run) ---
-            if sampled_epochs:
-                print("\nGenerating and saving plots for this run...")
-                try:
-                    plt.style.use("seaborn-v0_8-darkgrid")
-                    print("Using 'seaborn-v0_8-darkgrid' style for plots.")
-                except OSError:
-                    print(
-                        "Warning: Style 'seaborn-v0_8-darkgrid' not found. Using default style."
-                    )
-                    pass
-                # Grafico 1: Loss
-                plt.figure(figsize=(10, 6))
-                plt.plot(
-                    sampled_epochs,
-                    losses_train,
-                    label="Training Loss",
-                    marker="o",
-                    linestyle="-",
-                )
-                plt.plot(
-                    sampled_epochs,
-                    losses_dev,
-                    label="Development Loss",
-                    marker="x",
-                    linestyle="--",
-                )
-                plt.xlabel("Epochs")
-                plt.ylabel("Cross-Entropy Loss")
-                # !! Aggiorna titolo grafico !!
-                plt.title(
-                    f"Training vs Development Loss\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, AdamW)"
-                )
-                plt.legend()
-                loss_plot_path = os.path.join(output_dir, "loss_vs_epochs.png")
-                plt.savefig(loss_plot_path)
-                plt.close()
-                print(f"Loss plot saved to: {loss_plot_path}")
-
-                # Grafico 2: Perplexity
-                plt.figure(figsize=(10, 6))
-                plt.plot(
-                    sampled_epochs,
-                    ppls_dev,
-                    label="Development Perplexity",
-                    marker="o",
-                    linestyle="-",
-                    color="red",
-                )
-                plt.xlabel("Epochs")
-                plt.ylabel("Perplexity (PPL)")
-                # !! Aggiorna titolo grafico !!
-                plt.title(
-                    f"Development Perplexity over Epochs\n({experiment_name} - Run {current_run}: lr={lr}, bs={batch_size}, AdamW)"
-                )
-                if best_dev_ppl != math.inf:
-                    plt.scatter(
-                        best_epoch_num,
-                        best_dev_ppl,
-                        color="blue",
-                        s=100,
-                        zorder=5,
-                        label=f"Best PPL ({best_dev_ppl:.2f}) at Epoch {best_epoch_num}",
-                    )
-                plt.legend()
-                ppl_plot_path = os.path.join(output_dir, "perplexity_vs_epochs.png")
-                plt.savefig(ppl_plot_path)
-                plt.close()
-                print(f"Perplexity plot saved to: {ppl_plot_path}")
-
-            else:
-                print("\nNo epochs completed for this run, skipping plot generation.")
-
-            # --- 4.9. Stampa Finale Risultati della Run su Terminale ---
-            print(f"\n--- Summary for Run {current_run} (lr={lr}, bs={batch_size}) ---")
-            final_results_data = [
-                [
-                    "Best Development PPL",
-                    f"{best_dev_ppl:.4f}" if best_dev_ppl != math.inf else "N/A",
-                ],
-                [
-                    "Final Test PPL",
-                    f"{final_test_ppl:.4f}" if final_test_ppl != math.inf else "N/A",
-                ],
-                [
-                    "Total Epochs Trained",
-                    epochs_trained if epochs_trained > 0 else "N/A",
-                ],
-            ]
-            print(
-                tabulate(
-                    final_results_data, headers=["Metric", "Value"], tablefmt="pretty"
-                )
-            )
-            print(f"===== END OF RUN {current_run}/{total_runs} =====")
-
-    print("\n--- All Hyperparameter Tuning Runs Finished ---")
-
-    # --- 5. Analisi Aggregata e Grafici Comparativi ---
-    print(f"\n--- Starting Aggregate Analysis for {experiment_name} ---")
-
-    if not all_run_results:
-        print("No run results collected. Skipping aggregate analysis.")
+        # --- Salvataggio Modello Migliore ---
+        print("\nSaving best model state dict...")
+        os.makedirs(model_save_dir, exist_ok=True)
+        model_filename = f"{experiment_step}_lr{lr}_bs{batch_size}.pt"
+        model_save_path = os.path.join(model_save_dir, model_filename)
+        try:
+            torch.save(best_model_state_dict, model_save_path)
+            print(f"   Model saved to: {model_save_path}")
+        except Exception as e:
+            print(f"   Error saving model: {e}")
     else:
-        # Crea DataFrame riassuntivo
-        summary_df = pd.DataFrame(all_run_results)
-        summary_df.replace([math.inf, -math.inf], pd.NA, inplace=True)
+        print("\nNo best model state saved.")
 
-        # Salva il DataFrame riassuntivo
-        summary_csv_path = os.path.join(
-            main_output_folder, f"summary_results_{experiment_name}.csv"
-        )
-        summary_df.to_csv(summary_csv_path, index=False)
-        print(f"\nSummary results saved to: {summary_csv_path}")
-
-        # Stampa il DataFrame riassuntivo
-        print("\n--- Aggregate Results Summary ---")
-        print(
-            tabulate(
-                summary_df.round(4).fillna("Failed"),
-                headers="keys",
-                tablefmt="pretty",
-                showindex=False,
-            )
-        )
-
-        # Genera Heatmap (Best Dev PPL)
-        try:
-            summary_df["best_dev_ppl"] = pd.to_numeric(
-                summary_df["best_dev_ppl"], errors="coerce"
-            )
-            heatmap_data_dev = summary_df.pivot(
-                index="learning_rate", columns="batch_size", values="best_dev_ppl"
-            )
-
-            plt.figure(figsize=(10, 7))
-            sns.heatmap(
-                heatmap_data_dev,
-                annot=True,
-                fmt=".2f",
-                cmap="viridis_r",
-                linewidths=0.5,
-                cbar_kws={"label": "Best Development PPL"},
-            )
-            # !! Aggiorna titolo heatmap !!
-            plt.title(
-                f"Best Development PPL Heatmap ({experiment_name}: LSTM+Dropout+AdamW)"
-            )
-            plt.xlabel("Batch Size")
-            plt.ylabel("Learning Rate")
-            heatmap_dev_path = os.path.join(
-                main_output_folder, f"summary_heatmap_dev_ppl_{experiment_name}.png"
-            )
-            plt.savefig(heatmap_dev_path)
-            plt.close()
-            print(f"Development PPL heatmap saved to: {heatmap_dev_path}")
-
-        except Exception as e:
-            print(f"Could not generate Dev PPL heatmap: {e}")
-
-        # Genera Heatmap (Final Test PPL)
-        try:
-            summary_df["final_test_ppl"] = pd.to_numeric(
-                summary_df["final_test_ppl"], errors="coerce"
-            )
-            heatmap_data_test = summary_df.pivot(
-                index="learning_rate", columns="batch_size", values="final_test_ppl"
-            )
-
-            plt.figure(figsize=(10, 7))
-            sns.heatmap(
-                heatmap_data_test,
-                annot=True,
-                fmt=".2f",
-                cmap="viridis_r",
-                linewidths=0.5,
-                cbar_kws={"label": "Final Test PPL"},
-            )
-            # !! Aggiorna titolo heatmap !!
-            plt.title(f"Final Test PPL Heatmap ({experiment_name}: LSTM+Dropout+AdamW)")
-            plt.xlabel("Batch Size")
-            plt.ylabel("Learning Rate")
-            heatmap_test_path = os.path.join(
-                main_output_folder, f"summary_heatmap_test_ppl_{experiment_name}.png"
-            )
-            plt.savefig(heatmap_test_path)
-            plt.close()
-            print(f"Test PPL heatmap saved to: {heatmap_test_path}")
-
-        except Exception as e:
-            print(f"Could not generate Test PPL heatmap: {e}")
-
-    print("\n--- Aggregate Analysis Finished ---")
-    print(f"--- Experiment {experiment_name} Run Finished ---")
+    print(f"\n--- Script {experiment_step} Finished ---")
