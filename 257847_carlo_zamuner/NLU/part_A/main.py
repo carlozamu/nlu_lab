@@ -3,9 +3,10 @@
 # Questo file è usato per eseguire le tue funzioni e stampare i risultati
 
 import os
+import csv
 from pprint import pprint
-import matplotlib.pyplot as plt  # Per il plot delle loss
-from tqdm import tqdm  # Per la barra di progresso
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -13,9 +14,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
-from collections import Counter  # Importato per lo split stratificato
+from collections import Counter
 
-# Importa tutto da utils.py (dati, Lang, Dataset, collate, init_weights, device)
+# Importa tabulate
+from tabulate import tabulate
+
+# Importa tutto da utils.py
 from utils import *
 
 # Importa il modello BASELINE da model.py
@@ -31,10 +35,9 @@ except ImportError:
 
 # --- Funzioni di Training e Valutazione (invariate) ---
 
-
 def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=5):
     """Esegue un'epoca di addestramento."""
-    model.train()  # Modalità addestramento
+    model.train()
     loss_array = []
     for sample in tqdm(data, desc="Training Progress"):
         optimizer.zero_grad()
@@ -48,10 +51,9 @@ def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=
         optimizer.step()
     return np.mean(loss_array)
 
-
 def eval_loop(data, criterion_slots, criterion_intents, model, lang):
     """Esegue la valutazione sul dataset fornito (dev o test)."""
-    model.eval()  # Modalità valutazione
+    model.eval()
     loss_array = []
     ref_intents, hyp_intents = [], []
     ref_slots, hyp_slots = [], []
@@ -109,8 +111,38 @@ def eval_loop(data, criterion_slots, criterion_intents, model, lang):
     return slot_f1, intent_acc, np.mean(loss_array)
 
 
+# --- Funzione per creare le cartelle di output ---
+def create_run_output_dir(base_results_dir, step_name, run_params_str):
+    """Crea la struttura di directory per salvare i risultati di una run."""
+    run_dir = os.path.join(base_results_dir, step_name, run_params_str)
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"Risultati per questa run verranno salvati in: {run_dir}")
+    return run_dir
+
+# --- Funzione per salvare la storia delle metriche per epoca ---
+def save_epoch_history(run_output_dir, history_data):
+    """Salva la lista di dizionari history_data in un file CSV."""
+    csv_filepath = os.path.join(run_output_dir, 'epoch_history.csv')
+    fieldnames = ['Epoch', 'Train_Loss', 'Dev_Loss', 'Dev_Slot_F1', 'Dev_Intent_Acc']
+    with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for data_row in history_data:
+            writer.writerow(data_row)
+
+# --- Funzione per salvare i risultati finali del test set ---
+def save_test_results(run_output_dir, test_f1, test_acc, test_loss):
+    """Salva i risultati finali del test set in un file CSV."""
+    csv_filepath = os.path.join(run_output_dir, 'test_results.csv')
+    fieldnames = ['Test_Slot_F1', 'Test_Intent_Acc', 'Test_Loss']
+    with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow({'Test_Slot_F1': test_f1, 'Test_Intent_Acc': test_acc, 'Test_Loss': test_loss})
+
 # --- Blocco Principale di Esecuzione ---
 if __name__ == "__main__":
+
     # --- 1. Caricamento e Preparazione Dati (invariato) ---
     print("Caricamento dati ATIS...")
     data_dir = os.path.join("dataset", "ATIS")
@@ -167,10 +199,21 @@ if __name__ == "__main__":
     )
     print("DataLoader pronti.")
 
-    # --- 5. Definizione Iperparametri (invariato) ---
-    hid_size, emb_size = 200, 300
-    lr, clip = 0.001, 5
-    n_epochs, patience = 50, 5
+    # --- 5. Definizione Iperparametri ---
+    # Parametri per la configurazione BASELINE
+    hid_size = 200
+    emb_size = 300
+    lr = 0.001
+    clip = 5
+    n_epochs = 50
+    patience = 5
+    # Parametri che definiscono l'architettura (per il nome della cartella)
+    # Mantienili qui anche se non usati direttamente per la baseline ModelIAS
+    # Saranno utili per generare il nome della cartella
+    bidirectional = False
+    dropout_rate = 0.0
+
+
     out_slot, out_int, vocab_len = (
         len(lang.slot2id),
         len(lang.intent2id),
@@ -179,38 +222,58 @@ if __name__ == "__main__":
     criterion_slots = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
     criterion_intents = nn.CrossEntropyLoss()
 
-    # --- 6. Addestramento e Valutazione SOLO per il Modello BASELINE ---
-    print("\n--- Esecuzione Configurazione: BASELINE ---")
+    # --- Configurazione Specifica per questa Run (Baseline) ---
+    config_name = "BASELINE"
+    # Crea una stringa descrittiva dei parametri per il nome della cartella
+    # Includi solo i parametri rilevanti per questa run, ma puoi aggiungere altri in futuro
+    params_string = f"hid{hid_size}_emb{emb_size}_lr{lr}_p{patience}_bs{batch_size_train}"
 
-    # Istanzia SOLO il modello BASELINE
-    model = ModelIAS(
-        hid_size, out_slot, out_int, emb_size, vocab_len, pad_index=PAD_TOKEN
-    )
+    # Crea le cartelle di output per questa specifica run
+    base_results_directory = "results"
+    step_directory_name = "step_baseline" # Nome specifico per lo step 2.A - Baseline
+    run_output_directory = create_run_output_dir(base_results_directory, step_directory_name, params_string)
+
+
+    # --- 6. Addestramento e Valutazione (Modificato per salvare storia) ---
+    print(f"\n--- Esecuzione Configurazione: {config_name} ---")
+
+    # Istanzia il modello BASELINE
+    model = ModelIAS(hid_size, out_slot, out_int, emb_size, vocab_len, pad_index=PAD_TOKEN)
     model.to(device)
     model.apply(init_weights)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    losses_train_hist, losses_dev_hist, sampled_epochs_hist = [], [], []
+    epoch_history_data = [] # Lista per salvare i dati per la history CSV
+
     best_f1_dev, current_patience_count, best_epoch_num = 0.0, patience, 0
     best_model_state_dict = None
 
-    print(f"Inizio addestramento BASELINE per max {n_epochs} epoche...")
+    print(f"Inizio addestramento {config_name} per max {n_epochs} epoche...")
     for epoch in range(1, n_epochs + 1):
         print(f"\nEpoca {epoch}/{n_epochs}")
+
+        # Training loop
         loss_train_epoch = train_loop(
             train_loader, optimizer, criterion_slots, criterion_intents, model, clip
         )
-        losses_train_hist.append(loss_train_epoch)
         print(f"Loss Addestramento Media: {loss_train_epoch:.4f}")
 
+        # Evaluation loop on Dev set
         f1_dev_epoch, acc_dev_epoch, loss_dev_epoch = eval_loop(
             dev_loader, criterion_slots, criterion_intents, model, lang
         )
-        losses_dev_hist.append(loss_dev_epoch)
-        sampled_epochs_hist.append(epoch)
         print(
             f"Risultati Dev: Loss={loss_dev_epoch:.4f}, Slot F1={f1_dev_epoch:.4f}, Intent Acc={acc_dev_epoch:.4f}"
         )
+
+        # Salva i dati dell'epoca per la history
+        epoch_history_data.append({
+            'Epoch': epoch,
+            'Train_Loss': loss_train_epoch,
+            'Dev_Loss': loss_dev_epoch,
+            'Dev_Slot_F1': f1_dev_epoch,
+            'Dev_Intent_Acc': acc_dev_epoch
+        })
 
         # Early Stopping Logic
         if f1_dev_epoch > best_f1_dev:
@@ -219,51 +282,53 @@ if __name__ == "__main__":
             current_patience_count = patience
             print(f"*** Nuovo miglior F1 Dev! Salvo stato modello (Epoca {epoch}). ***")
             best_model_state_dict = model.state_dict().copy()
+            torch.save(best_model_state_dict, os.path.join(run_output_directory, 'best_model.pth'))
         else:
             current_patience_count -= 1
-            print(
-                f"Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}"
-            )
+            print(f"Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}")
 
         if current_patience_count <= 0:
             print(f"--- Early stopping attivato all'epoca {epoch}. ---")
             break
 
-    print(f"\nAddestramento BASELINE completato.")
+    print(f"\nAddestramento {config_name} completato.")
     if best_model_state_dict:
-        print(
-            f"Miglior F1 Slot su Dev set: {best_f1_dev:.4f} ottenuto all'epoca {best_epoch_num}"
-        )
+         print(f"Miglior F1 Slot su Dev set: {best_f1_dev:.4f} ottenuto all'epoca {best_epoch_num}")
     else:
-        print("Attenzione: Nessun modello migliore salvato.")
+         print("Attenzione: Nessun modello migliore salvato (addestramento interrotto presto o nessun miglioramento). Valuto con l'ultimo stato.")
+         best_model_state_dict = model.state_dict().copy()
 
-    # --- 7. Valutazione Finale sul Test Set (solo Baseline) ---
-    print(f"Valutazione BASELINE sul Test set...")
+
+    # --- 7. Valutazione Finale sul Test Set ---
+    print(f"\nValutazione {config_name} sul Test set...")
     if best_model_state_dict:
-        print(f"Carico il modello migliore dall'epoca {best_epoch_num}.")
+        print(f"Carico il modello migliore (o l'ultimo stato) per la valutazione sul Test set.")
         model.load_state_dict(best_model_state_dict)
-    else:
-        print("Valuto con l'ultimo stato del modello disponibile.")
 
     f1_test, acc_test, loss_test = eval_loop(
         test_loader, criterion_slots, criterion_intents, model, lang
     )
-    print("\n--- Risultati Finali BASELINE sul Test Set ---")
-    print(f"  Slot Filling F1: {f1_test:.4f}")
-    print(f"  Intent Classification Accuracy: {acc_test:.4f}")
-    print(f"  Loss Media Test: {loss_test:.4f}")
 
-    # --- 8. Plot delle Loss (solo Baseline) ---
+    # --- 8. Salvataggio Risultati e Plot ---
+    print("\nSalvataggio storia, risultati finali e grafici...")
+
+    # Salva la storia delle metriche (Train/Dev) per epoca
+    save_epoch_history(run_output_directory, epoch_history_data)
+
+    # Salva i risultati finali del Test set
+    save_test_results(run_output_directory, f1_test, acc_test, loss_test)
+
+    # Genera e salva il grafico delle Loss
     plt.figure(figsize=(10, 6))
-    plt.plot(
-        sampled_epochs_hist,
-        losses_train_hist[: len(sampled_epochs_hist)],
-        label=f"Train Loss",
-    )
-    plt.plot(sampled_epochs_hist, losses_dev_hist, label=f"Dev Loss")
-    plt.title(f"Andamento Loss - BASELINE")
-    plt.xlabel("Epoche")
-    plt.ylabel("Loss Media (Cross Entropy)")
+    epochs_plot = [d['Epoch'] for d in epoch_history_data]
+    train_losses_plot = [d['Train_Loss'] for d in epoch_history_data]
+    dev_losses_plot = [d['Dev_Loss'] for d in epoch_history_data]
+
+    plt.plot(epochs_plot, train_losses_plot, label='Train Loss')
+    plt.plot(epochs_plot, dev_losses_plot, label='Dev Loss')
+    plt.title(f'Andamento Loss - {config_name}')
+    plt.xlabel('Epoche')
+    plt.ylabel('Loss Media (Cross Entropy)')
     if best_epoch_num > 0:
         plt.axvline(
             x=best_epoch_num,
@@ -273,14 +338,45 @@ if __name__ == "__main__":
         )
     plt.legend()
     plt.grid(True)
-    plot_filename = f"loss_plot_BASELINE.png"
-    plt.savefig(plot_filename)
-    print(f"Grafico loss BASELINE salvato in: {plot_filename}")
+    loss_plot_filepath = os.path.join(run_output_directory, f"loss_plot.png")
+    plt.savefig(loss_plot_filepath)
+    print(f"Grafico loss salvato in: {loss_plot_filepath}")
     plt.close()
 
-    # --- 9. Riepilogo Risultati (Non necessario per singolo run) ---
-    # Rimosso il riepilogo comparativo
+    # Genera e salva il grafico delle Metriche (F1 e Accuracy)
+    plt.figure(figsize=(10, 6))
+    dev_f1s_plot = [d['Dev_Slot_F1'] for d in epoch_history_data]
+    dev_accs_plot = [d['Dev_Intent_Acc'] for d in epoch_history_data]
 
-    print("\nEsecuzione Baseline completata.")
+    plt.plot(epochs_plot, dev_f1s_plot, label='Dev Slot F1')
+    plt.plot(epochs_plot, dev_accs_plot, label='Dev Intent Accuracy')
+    plt.title(f'Andamento Metriche Dev - {config_name}')
+    plt.xlabel('Epoche')
+    plt.ylabel('Score')
+    if best_epoch_num > 0:
+        plt.axvline(
+            x=best_epoch_num,
+            color="r",
+            linestyle="--",
+            label=f"Best Dev F1 Epoch ({best_epoch_num})",
+        )
+    plt.legend()
+    plt.grid(True)
+    metrics_plot_filepath = os.path.join(run_output_directory, f"metrics_plot.png")
+    plt.savefig(metrics_plot_filepath)
+    print(f"Grafico metriche salvato in: {metrics_plot_filepath}")
+    plt.close()
+
+    # --- 9. Stampa Risultati Finali con Tabulate ---
+    print("\n--- Risultati Finali sul Test Set ---")
+    test_results_data = [
+        ["Slot Filling F1", f1_test],
+        ["Intent Classification Accuracy", acc_test],
+        ["Loss Media Test", loss_test]
+    ]
+    # Stampa la tabella formattata
+    print(tabulate(test_results_data, headers=["Metrica", "Valore"], tablefmt="grid"))
+
+    print("\nEsecuzione Baseline completata. Controllare la cartella 'results' per i dettagli.")
 
 # --- END OF FILE main.py ---
