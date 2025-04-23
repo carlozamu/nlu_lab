@@ -3,87 +3,112 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-import numpy as np  # Importato per gestire le lunghezze numpy
+import numpy as np
 
 # Qui è dove definisci l'architettura del tuo modello usando PyTorch
-# QUESTA È LA VERSIONE BASELINE (LSTM Unidirezionale, No Dropout)
+# MODELLO CON BIDIREZIONALITÀ E DROPOUT CONFIGURABILI
 
 
 class ModelIAS(nn.Module):
-    """Modello BASELINE per Intent And Slot filling basato su LSTM UNIDIREZIONALE."""
+    """Modello per Intent And Slot filling basato su LSTM con bidirezionalità e dropout configurabili."""
 
-    # Rimossi bidirectional e dropout_rate dagli argomenti __init__
     def __init__(
-        self, hid_size, out_slot, out_int, emb_size, vocab_len, n_layer=1, pad_index=0
+        self,
+        hid_size,
+        out_slot,
+        out_int,
+        emb_size,
+        vocab_len,
+        n_layer=1,
+        pad_index=0,
+        bidirectional=False,
+        dropout_rate=0.0,
     ):
         """
-        Inizializza i layer del modello BASELINE.
+        Inizializza i layer del modello.
         Args:
-            hid_size (int): Dimensione dello stato nascosto dell'LSTM.
+            hid_size (int): Dimensione dello stato nascosto dell'LSTM (per *ogni* direzione).
             out_slot (int): Numero di classi di slot.
             out_int (int): Numero di classi di intent.
-            emb_size (int): Dimensione degli embedding delle parole.
-            vocab_len (int): Dimensione del vocabolario.
+            emb_size (int): Dimensione degli embedding.
+            vocab_len (int): Dimensione vocabolario.
             n_layer (int): Numero di layer LSTM (default: 1).
-            pad_index (int): Indice usato per il padding (default: 0).
+            pad_index (int): Indice padding (default: 0).
+            bidirectional (bool): Se True, usa LSTM bidirezionale (default: False).
+            dropout_rate (float): Tasso di dropout (default: 0.0).
         """
         super(ModelIAS, self).__init__()
-        # Layer di Embedding
         self.embedding = nn.Embedding(vocab_len, emb_size, padding_idx=pad_index)
 
-        # Layer LSTM - Forzato a essere UNIDIREZIONALE
-        # bidirectional=False è il default, ma lo esplicitiamo per chiarezza
+        # --- Configurazione LSTM ---
+        lstm_hid_size = hid_size
+        direction_multiplier = 2 if bidirectional else 1
+        linear_in_size = lstm_hid_size * direction_multiplier
+
+        # Layer LSTM con bidirezionalità configurabile
         self.utt_encoder = nn.LSTM(
-            emb_size, hid_size, n_layer, bidirectional=False, batch_first=True
+            emb_size,
+            lstm_hid_size,
+            n_layer,
+            bidirectional=bidirectional,
+            batch_first=True,
         )
+        self.is_bidirectional = bidirectional
 
-        # Layer Lineari di Output - L'input è hid_size (non hid_size*2)
-        self.slot_out = nn.Linear(hid_size, out_slot)
-        self.intent_out = nn.Linear(hid_size, out_int)
+        # Layer Lineari di Output - Adattano la dimensione di input
+        self.slot_out = nn.Linear(linear_in_size, out_slot)
+        self.intent_out = nn.Linear(linear_in_size, out_int)
 
-        # NESSUN layer Dropout definito qui per la baseline
+        # Layer Dropout (presente ma applicato solo se dropout_rate > 0)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.dropout_rate = dropout_rate
 
     def forward(self, utterance, seq_lengths):
         """
-        Passaggio forward del modello BASELINE.
-        Args:
-            utterance (Tensor): Batch di sequenze di indici (batch_size, seq_len).
-            seq_lengths (Tensor): Lunghezze originali delle sequenze.
-        Returns:
-            tuple: (slots, intent)
-                   - slots (Tensor): Logits slot (batch_size, num_slot_classes, seq_len).
-                   - intent (Tensor): Logits intent (batch_size, num_intent_classes).
+        Passaggio forward del modello.
         """
-        # 1. Embedding
         utt_emb = self.embedding(utterance)
-        # NESSUN dropout applicato qui
 
-        # 2. Packing
+        # Applica dropout agli embedding (solo se dropout_rate > 0)
+        if self.dropout_rate > 0:
+            utt_emb = self.dropout(utt_emb)
+
+        # Packing
         lengths_cpu = seq_lengths.cpu().clone().numpy()
         if not np.all(lengths_cpu > 0):
-            # print("Attenzione: rilevate lunghezze di sequenza pari a zero nel batch.") # Commentato per meno output
             lengths_cpu = np.maximum(lengths_cpu, 1)
         packed_input = pack_padded_sequence(
             utt_emb, lengths_cpu, batch_first=True, enforce_sorted=False
         )
 
-        # 3. Processamento RNN (LSTM Unidirezionale)
+        # Processamento RNN (LSTM)
         packed_output, (hidden, cell) = self.utt_encoder(packed_input)
 
-        # 4. Unpacking
+        # Unpacking
         utt_encoded, _ = pad_packed_sequence(packed_output, batch_first=True)
-        # NESSUN dropout applicato qui
 
-        # 5. Estrazione ultimo stato nascosto per intento (solo ultima direzione)
-        # hidden è (n_layer, batch, hid_size) perché unidirezionale
-        last_hidden = hidden[-1, :, :]
-        # NESSUN dropout applicato qui
+        # Applica dropout all'output dell'LSTM (solo se dropout_rate > 0)
+        if self.dropout_rate > 0:
+            utt_encoded = self.dropout(utt_encoded)
 
-        # 6. Calcolo Logits
-        slots = self.slot_out(utt_encoded)  # Input è (batch, seq_len, hid_size)
-        intent = self.intent_out(last_hidden)  # Input è (batch, hid_size)
+        # Estrazione ultimo stato nascosto per intento
+        # hidden è (n_layer * num_directions, batch, hid_size)
+        if self.is_bidirectional:
+            # Concatena ultimo stato forward e backward dell'ultimo layer
+            last_hidden = torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1)
+        else:
+            # Prendi ultimo stato dell'ultimo layer
+            last_hidden = hidden[-1, :, :]
 
-        # 7. Permutazione Dimensioni Slot per Loss
+        # Applica dropout all'ultimo stato nascosto (solo se dropout_rate > 0)
+        if self.dropout_rate > 0:
+            last_hidden = self.dropout(last_hidden)
+
+        # Calcolo Logits
+        slots = self.slot_out(utt_encoded)
+        intent = self.intent_out(last_hidden)
+
+        # Permutazione Dimensioni Slot per Loss
         slots = slots.permute(0, 2, 1)
 
         return slots, intent

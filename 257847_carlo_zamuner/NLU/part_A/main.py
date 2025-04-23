@@ -1,10 +1,15 @@
+# --- START OF FILE main.py ---
+
+# Questo file è usato per eseguire le tue funzioni e stampare i risultati
+# Modificato per eseguire una GRID SEARCH su Dropout Rate, Learning Rate, Batch Size
+# per l'architettura BIDIREZIONALE (Step 2.A - Grid Search)
+# e generare HEATMAPS
 
 import os
 import csv
 from pprint import pprint
 import matplotlib.pyplot as plt
-# Rimuoviamo l'import diretto di tqdm qui, lo useremo solo nel loop delle epoche
-# from tqdm import tqdm
+from tqdm import tqdm  # Importato per la barra di progresso
 
 import numpy as np
 import torch
@@ -14,12 +19,16 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
 from collections import Counter
 
-from tabulate import tabulate # Importato per la tabella finale
+from tabulate import tabulate  # Importato per la tabella finale
+
+# Import per Heatmap
+import pandas as pd
+import seaborn as sns
 
 # Importa tutto da utils.py
 from utils import *
 
-# Importa il modello BASELINE da model.py
+# Importa il modello (con bidirezionalità/dropout configurabili) da model.py
 from model import ModelIAS
 
 # Importa lo script di valutazione conll
@@ -30,13 +39,15 @@ except ImportError:
     exit()
 
 
-# --- Funzioni di Training e Valutazione (Modificate per rimuovere tqdm interno) ---
+# --- Funzioni di Training e Valutazione (senza tqdm interno - invariate) ---
+# train_loop e eval_loop rimangono le stesse
+
 
 def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=5):
-    """Esegue un'epoca di addestramento (senza barra tqdm interna sui batch)."""
+    """Esegue un'epoca di addestramento."""
     model.train()
     loss_array = []
-    # Rimosso tqdm dall'iterazione sui batch
+    # Non usiamo tqdm qui per ridurre l'output annidato nella grid search
     for sample in data:
         optimizer.zero_grad()
         slots, intent = model(sample["utterances"], sample["slots_len"])
@@ -49,21 +60,21 @@ def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=
         optimizer.step()
     return np.mean(loss_array)
 
+
 def eval_loop(data, criterion_slots, criterion_intents, model, lang):
-    """Esegue la valutazione (senza barra tqdm interna sui batch)."""
+    """Esegue la valutazione."""
     model.eval()
     loss_array = []
     ref_intents, hyp_intents = [], []
     ref_slots, hyp_slots = [], []
     with torch.no_grad():
-         # Rimosso tqdm dall'iterazione sui batch
+        # Non usiamo tqdm qui per ridurre l'output annidato nella grid search
         for sample in data:
             slots, intents = model(sample["utterances"], sample["slots_len"])
             loss_intent = criterion_intents(intents, sample["intents"])
             loss_slot = criterion_slots(slots, sample["y_slots"])
             loss = loss_intent + loss_slot
             loss_array.append(loss.item())
-            # Intent Inference
             out_intents_ids = torch.argmax(intents, dim=1).cpu().tolist()
             hyp_intents.extend(
                 [lang.id2intent.get(idx, "UNK_INTENT") for idx in out_intents_ids]
@@ -74,7 +85,6 @@ def eval_loop(data, criterion_slots, criterion_intents, model, lang):
                     for idx in sample["intents"].cpu().tolist()
                 ]
             )
-            # Slot Inference
             output_slots_ids = torch.argmax(slots, dim=1)
             for id_seq in range(output_slots_ids.size(0)):
                 length = sample["slots_len"][id_seq].item()
@@ -95,54 +105,108 @@ def eval_loop(data, criterion_slots, criterion_intents, model, lang):
                 ]
                 ref_slots.append(list(zip(utterance, gt_slots_labels)))
                 hyp_slots.append(list(zip(utterance, pred_slots_labels)))
-    # Calcolo Metriche Slot Filling (conll)
     try:
         results = evaluate(ref_slots, hyp_slots)
         slot_f1 = results.get("total", {}).get("f", 0.0)
     except Exception as ex:
-        print(f"\nAttenzione: Errore durante la valutazione conll: {ex}")
+        tqdm.write(f"\nAttenzione: Errore durante la valutazione conll: {ex}")
         slot_f1 = 0.0
-    # Calcolo Metriche Intent Classification (sklearn)
     report_intent = classification_report(
         ref_intents, hyp_intents, zero_division=0, output_dict=True
     )
     intent_acc = report_intent.get("accuracy", 0.0)
-    return slot_f1, intent_acc, np.mean(loss_array)
+    mean_loss = np.mean(loss_array) if loss_array else float("inf")
+    return slot_f1, intent_acc, mean_loss
 
 
-# --- Funzione per creare le cartelle di output ---
+# --- Funzioni per la gestione dei risultati e delle cartelle (invariate) ---
 def create_run_output_dir(base_results_dir, step_name, run_params_str):
-    """Crea la struttura di directory per salvare i risultati di una run."""
     run_dir = os.path.join(base_results_dir, step_name, run_params_str)
     os.makedirs(run_dir, exist_ok=True)
-    print(f"Risultati per questa run verranno salvati in: {run_dir}")
+    # Non stampiamo più qui, lo facciamo nel loop principale con tqdm.write
     return run_dir
 
-# --- Funzione per salvare la storia delle metriche per epoca ---
-def save_epoch_history(run_output_dir, history_data):
-    """Salva la lista di dizionari history_data in un file CSV."""
-    csv_filepath = os.path.join(run_output_dir, 'epoch_history.csv')
-    fieldnames = ['Epoch', 'Train_Loss', 'Dev_Loss', 'Dev_Slot_F1', 'Dev_Intent_Acc']
-    with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for data_row in history_data:
-            writer.writerow(data_row)
 
-# --- Funzione per salvare i risultati finali del test set ---
-def save_test_results(run_output_dir, test_f1, test_acc, test_loss):
-    """Salva i risultati finali del test set in un file CSV."""
-    csv_filepath = os.path.join(run_output_dir, 'test_results.csv')
-    fieldnames = ['Test_Slot_F1', 'Test_Intent_Acc', 'Test_Loss']
-    with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
+def save_epoch_history(run_output_dir, history_data):
+    csv_filepath = os.path.join(run_output_dir, "epoch_history.csv")
+    if not history_data:  # Gestisci caso di storia vuota (es. errore all'inizio)
+        print(f"Warning: Nessun dato storico da salvare per {run_output_dir}")
+        return
+    fieldnames = history_data[0].keys()  # Prendi le chiavi dal primo dizionario
+    with open(csv_filepath, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerow({'Test_Slot_F1': test_f1, 'Test_Intent_Acc': test_acc, 'Test_Loss': test_loss})
+        writer.writerows(history_data)
+
+
+def save_test_results(run_output_dir, test_f1, test_acc, test_loss):
+    csv_filepath = os.path.join(run_output_dir, "test_results.csv")
+    fieldnames = ["Test_Slot_F1", "Test_Intent_Acc", "Test_Loss"]
+    with open(csv_filepath, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "Test_Slot_F1": test_f1,
+                "Test_Intent_Acc": test_acc,
+                "Test_Loss": test_loss,
+            }
+        )
+
+
+# --- Funzione per generare e salvare Heatmap ---
+def save_heatmap(
+    df,
+    index_col,
+    columns_col,
+    value_col,
+    title,
+    filename,
+    run_output_dir_base,
+    cmap="viridis",
+    fmt=".4f",
+):
+    """Genera e salva una heatmap da un DataFrame pandas."""
+    try:
+        # Crea la tabella pivot, usando la media se ci sono duplicati (dovuti al terzo parametro non visualizzato)
+        pivot_table = pd.pivot_table(
+            df, values=value_col, index=index_col, columns=columns_col, aggfunc=np.mean
+        )
+
+        plt.figure(
+            figsize=(
+                len(pivot_table.columns) * 1.5 + 4,
+                len(pivot_table.index) * 0.8 + 3,
+            )
+        )  # Adatta dimensione
+        # Per la loss, un cmap diverso può essere migliore (es. 'coolwarm' o 'YlGnBu_r')
+        cmap_val = "viridis" if "F1" in metric or "Acc" in metric else "YlGnBu_r"
+        sns.heatmap(pivot_table, annot=True, fmt=fmt, cmap=cmap_val, linewidths=0.5)
+        plt.title(
+            f"{metric} vs {idx_param} & {col_param}\n(Aggregato su {agg_param})",
+            fontsize=12,
+        )
+        plt.xlabel(col_param, fontsize=10)
+        plt.ylabel(idx_param, fontsize=10)
+        plt.xticks(rotation=45, ha="right")
+        plt.yticks(rotation=0)
+        plt.tight_layout()
+
+        filename = f"heatmap_{metric_safe_name}_vs_{idx_param.replace(' ', '')}_vs_{col_param.replace(' ', '')}.png"
+        filepath = os.path.join(run_output_dir_base, filename)
+        plt.savefig(filepath)
+        plt.close()
+        print(f"  Heatmap salvata: {filepath}")
+    except Exception as e:
+        print(
+            f"  Errore durante la generazione/salvataggio della heatmap per {metric} ({idx_param} vs {col_param}): {e}"
+        )
+
 
 # --- Blocco Principale di Esecuzione ---
 if __name__ == "__main__":
-
-    # --- 1. Caricamento e Preparazione Dati (invariato) ---
+    # --- 1. Caricamento e Preparazione Dati ---
+    # Scommentiamo il blocco di caricamento e preparazione dati
     print("Caricamento dati ATIS...")
     data_dir = os.path.join("dataset", "ATIS")
     train_raw = load_data(os.path.join(data_dir, "train.json"))
@@ -160,13 +224,14 @@ if __name__ == "__main__":
             labels.append(intent)
         else:
             mini_train.append(train_raw[i])
+    # train_test_split ora prende inputs e labels
     X_train, X_dev, _, _ = train_test_split(
         inputs,
-        labels,
+        labels,  # Passa labels qui per stratify
         test_size=portion,
         random_state=42,
         shuffle=True,
-        stratify=labels,
+        stratify=labels,  # Stratifica sulle labels
     )
     X_train.extend(mini_train)
     train_raw, dev_raw = X_train, X_dev
@@ -182,32 +247,37 @@ if __name__ == "__main__":
     print(f"Vocabolario: {len(lang.word2id)} parole")
     print(f"Slot: {len(lang.slot2id)} etichette")
     print(f"Intenti: {len(lang.intent2id)} etichette")
-    print("Creazione Dataset e DataLoader...")
+    print("Creazione Dataset...")
+    # Crea le istanze dei Dataset
     train_dataset = IntentsAndSlots(train_raw, lang)
     dev_dataset = IntentsAndSlots(dev_raw, lang)
     test_dataset = IntentsAndSlots(test_raw, lang)
-    batch_size_train, batch_size_eval = 128, 64
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size_train, collate_fn=collate_fn, shuffle=True
-    )
-    dev_loader = DataLoader(
-        dev_dataset, batch_size=batch_size_eval, collate_fn=collate_fn
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size_eval, collate_fn=collate_fn
-    )
-    print("DataLoader pronti.")
+    print("Dataset pronti.")
 
-    # --- 5. Definizione Iperparametri ---
+    # --- 5. Definizione Iperparametri FISSI e Liste per GRID SEARCH ---
+    # Parametri fissi generali
     hid_size = 200
     emb_size = 300
-    lr = 0.001
     clip = 5
-    n_epochs = 50
-    patience = 5
-    bidirectional = False # Per nome cartella
-    dropout_rate = 0.0    # Per nome cartella
+    n_epochs = 200
+    patience = 3
 
+    # Architettura fissa: BIDIREZIONALE
+    bidirectional = True
+
+    # Liste dei parametri da testare nella Grid Search
+    # ATTENZIONE: Il numero totale di run sarà len(dropout)*len(lr)*len(batch)
+    # Puoi modificare queste liste in base ai risultati dei tuning sequenziali se li fai prima
+    dropout_rates_to_test = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+    learning_rates_to_test = [
+        0.0005,
+        0.001,
+        0.005,
+    ]  # Puoi usare i migliori 3-4 dalla bidirezionale lr tuning
+    batch_sizes_to_test = [
+        64,
+        128,
+    ]  # Esempi: puoi aggiungere 32, 256 se la memoria lo permette
 
     out_slot, out_int, vocab_len = (
         len(lang.slot2id),
@@ -217,176 +287,442 @@ if __name__ == "__main__":
     criterion_slots = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
     criterion_intents = nn.CrossEntropyLoss()
 
-    # --- Configurazione Specifica per questa Run (Baseline) ---
-    config_name = "BASELINE"
-    # Stringa parametri per nome cartella. Puoi aggiungere/togliere parametri qui.
-    params_string = f"hid{hid_size}_emb{emb_size}_lr{lr}_p{patience}_bs{batch_size_train}"
-    # Aggiungi parametri architettonici al nome della cartella per i prossimi step
-    params_string += f"_bi{int(bidirectional)}_dr{dropout_rate}".replace('.', '') # Remove dot for filenames
-
+    # --- 6. Inizio Grid Search ---
     base_results_directory = "results"
-    step_directory_name = "step_baseline"
-    run_output_directory = create_run_output_dir(base_results_directory, step_directory_name, params_string)
+    step_directory_name = "step_bidrop_grid_search"  # Nome per questo step
 
+    all_runs_test_results = []  # Lista per raccogliere i risultati di TUTTE le combinazioni
 
-    # --- 6. Addestramento e Valutazione (Modificato per output) ---
-    print(f"\n--- Esecuzione Configurazione: {config_name} ---")
+    # Calcola il numero totale di run per tqdm
+    total_runs = (
+        len(dropout_rates_to_test)
+        * len(learning_rates_to_test)
+        * len(batch_sizes_to_test)
+    )
+    print(f"\nInizio Grid Search per l'architettura Bidirezionale+Dropout.")
+    print(f"Parametri da testare:")
+    print(f"  - Dropout Rates: {dropout_rates_to_test}")
+    print(f"  - Learning Rates: {learning_rates_to_test}")
+    print(f"  - Batch Sizes: {batch_sizes_to_test}")
+    print(f"Numero totale di combinazioni (run): {total_runs}")
+    print("-" * 30)
 
-    model = ModelIAS(hid_size, out_slot, out_int, emb_size, vocab_len, pad_index=PAD_TOKEN)
-    model.to(device)
-    model.apply(init_weights)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # Loop esterno principale per la Grid Search
+    run_counter = 0
+    # Non possiamo usare tqdm qui facilmente a causa dei loop annidati e della creazione dinamica dei dataloader
 
-    epoch_history_data = []
+    for dropout_rate in dropout_rates_to_test:
+        for lr in learning_rates_to_test:
+            for batch_size_train in batch_sizes_to_test:
+                run_counter += 1
+                # Usiamo print normale o tqdm.write per questi messaggi fuori dalla barra epoca
+                print(f"\n--- RUN {run_counter}/{total_runs} ---")
+                print(
+                    f"Parametri Correnti: Dropout={dropout_rate}, LR={lr}, BatchSize={batch_size_train}"
+                )
 
-    best_f1_dev, current_patience_count, best_epoch_num = 0.0, patience, 0
-    best_model_state_dict = None
+                # --- Configurazione Specifica per questa Run ---
+                config_name = f"BI_DR{dropout_rate}_LR{lr}_BS{batch_size_train}"
+                params_string = f"hid{hid_size}_emb{emb_size}_lr{str(lr).replace('.', '')}_p{patience}_bs{batch_size_train}_bi{int(bidirectional)}_dr{str(dropout_rate).replace('.', '')}"
 
-    print(f"Inizio addestramento {config_name} per max {n_epochs} epoche...")
-    # Usiamo tqdm qui per il loop delle epoche
-    epoch_iterator = tqdm(range(1, n_epochs + 1), desc=f"{config_name} Training")
+                # Usa tqdm.write (anche se fuori dal loop epoch_iterator in questo punto,
+                # tqdm.write è più sicuro di print per i messaggi intermedi)
+                run_output_directory = create_run_output_dir(
+                    base_results_directory, step_directory_name, params_string
+                )
+                tqdm.write(f"Output directory per questa run: {run_output_directory}")
 
-    for epoch in epoch_iterator:
-        # Rimosso la stampa \nEpoca X/Y qui, viene gestita dalla descrizione di tqdm
+                # --- Creazione DataLoader DINAMICA (dipende dal batch_size corrente) ---
+                # È importante ricreare i dataloader se il batch size cambia!
+                current_train_loader = DataLoader(
+                    train_dataset,  # train_dataset ora è definito
+                    batch_size=batch_size_train,
+                    collate_fn=collate_fn,
+                    shuffle=True,
+                )
+                # Dev e Test loader possono mantenere il batch size fisso o variare anche quello
+                # Manteniamo fisso quello di valutazione (64) come nel notebook originale per coerenza tra run
+                dev_loader = DataLoader(
+                    dev_dataset,
+                    batch_size=64,
+                    collate_fn=collate_fn,  # dev_dataset ora è definito
+                )
+                test_loader = DataLoader(
+                    test_dataset,
+                    batch_size=64,
+                    collate_fn=collate_fn,  # test_dataset ora è definito
+                )
+                print("DataLoader pronti per questa run.")  # Aggiunto per feedback
 
-        # Training loop (senza tqdm interno)
-        loss_train_epoch = train_loop(
-            train_loader, optimizer, criterion_slots, criterion_intents, model, clip
-        )
-        # Rimosso la stampa della loss di training qui
+                # --- Addestramento e Valutazione per la Combinazione Corrente ---
+                tqdm.write(f"\nEsecuzione Configurazione: {config_name}")
 
-        # Evaluation loop on Dev set (senza tqdm interno)
-        f1_dev_epoch, acc_dev_epoch, loss_dev_epoch = eval_loop(
-            dev_loader, criterion_slots, criterion_intents, model, lang
-        )
-        # Rimosso la stampa dei risultati dev qui
+                model = ModelIAS(
+                    hid_size,
+                    out_slot,
+                    out_int,
+                    emb_size,
+                    vocab_len,
+                    pad_index=PAD_TOKEN,
+                    bidirectional=bidirectional,
+                    dropout_rate=dropout_rate,
+                )
+                model.to(device)
+                model.apply(init_weights)
+                optimizer = optim.Adam(model.parameters(), lr=lr)
 
-        # Aggiorna la descrizione della barra di progresso di tqdm con i risultati dev
-        epoch_iterator.set_postfix({
-            'TrainLoss': f'{loss_train_epoch:.4f}',
-            'DevLoss': f'{loss_dev_epoch:.4f}',
-            'DevF1': f'{f1_dev_epoch:.4f}',
-            'DevAcc': f'{acc_dev_epoch:.4f}'
-        })
+                epoch_history_data = []
+                best_f1_dev, current_patience_count, best_epoch_num = 0.0, patience, 0
+                best_model_state_dict = None
 
-        # Salva i dati dell'epoca per la history
-        epoch_history_data.append({
-            'Epoch': epoch,
-            'Train_Loss': loss_train_epoch,
-            'Dev_Loss': loss_dev_epoch,
-            'Dev_Slot_F1': f1_dev_epoch,
-            'Dev_Intent_Acc': acc_dev_epoch
-        })
+                tqdm.write(f"Inizio addestramento per max {n_epochs} epoche...")
+                # Barra di progresso per le epoche di questa run
+                # Usiamo leave=True per lasciare la barra visibile finché tutti i loop annidati non sono completi
+                epoch_iterator = tqdm(
+                    range(1, n_epochs + 1),
+                    desc=f"Run {run_counter}/{total_runs} Training",
+                    leave=True,
+                )
 
-        # Early Stopping Logic
-        if f1_dev_epoch > best_f1_dev:
-            best_f1_dev = f1_dev_epoch
-            best_epoch_num = epoch
-            current_patience_count = patience
-            # Stampiamo solo un messaggio quando si trova un nuovo migliore
-            print(f"\n*** Epoca {epoch}: Nuovo miglior F1 Dev = {best_f1_dev:.4f}. Salvato stato modello. ***")
-            best_model_state_dict = model.state_dict().copy()
-            torch.save(best_model_state_dict, os.path.join(run_output_directory, 'best_model.pth'))
-        else:
-            current_patience_count -= 1
-            # Stampiamo solo un messaggio quando la pazienza diminuisce, non ad ogni epoca
-            if current_patience_count > 0 and current_patience_count < patience:
-                 if (patience - current_patience_count) % 2 == 0 or current_patience_count == 1: # Stampa meno frequentemente
-                    print(f"\nEpoca {epoch}: Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}")
+                try:  # Aggiunto blocco try per catturare errori critici durante l'addestramento
+                    for epoch in epoch_iterator:
+                        loss_train_epoch = train_loop(
+                            current_train_loader,
+                            optimizer,
+                            criterion_slots,
+                            criterion_intents,
+                            model,
+                            clip,
+                        )
 
+                        f1_dev_epoch, acc_dev_epoch, loss_dev_epoch = eval_loop(
+                            dev_loader, criterion_slots, criterion_intents, model, lang
+                        )
 
-        if current_patience_count <= 0:
-            print(f"\n--- Early stopping attivato all'epoca {epoch}. ---")
-            break
+                        epoch_iterator.set_postfix(
+                            {
+                                "TrainLoss": f"{loss_train_epoch:.4f}",
+                                "DevLoss": f"{loss_dev_epoch:.4f}",
+                                "DevF1": f"{f1_dev_epoch:.4f}",
+                                "DevAcc": f"{acc_dev_epoch:.4f}",
+                            }
+                        )
 
-    # Assicura che la barra di tqdm dell'epoca sia completata alla fine
-    epoch_iterator.close()
+                        epoch_history_data.append(
+                            {
+                                "Epoch": epoch,
+                                "Train_Loss": loss_train_epoch,
+                                "Dev_Loss": loss_dev_epoch,
+                                "Dev_Slot_F1": f1_dev_epoch,
+                                "Dev_Intent_Acc": acc_dev_epoch,
+                            }
+                        )
 
-    print(f"\nAddestramento {config_name} completato.")
-    if best_model_state_dict:
-         print(f"Miglior F1 Slot su Dev set: {best_f1_dev:.4f} ottenuto all'epoca {best_epoch_num}")
-    else:
-         print("Attenzione: Nessun modello migliore salvato (addestramento interrotto presto o nessun miglioramento). Valuto con l'ultimo stato.")
-         best_model_state_dict = model.state_dict().copy()
+                        # Early Stopping Logic
+                        if f1_dev_epoch > best_f1_dev:
+                            best_f1_dev = f1_dev_epoch
+                            best_epoch_num = epoch
+                            current_patience_count = patience
+                            tqdm.write(
+                                f"  (Run {run_counter}) Epoca {epoch}: Nuovo miglior F1 Dev = {best_f1_dev:.4f}. Salvato stato."
+                            )
+                            best_model_state_dict = model.state_dict().copy()
+                            torch.save(
+                                best_model_state_dict,
+                                os.path.join(run_output_directory, "best_model.pth"),
+                            )
+                        else:
+                            current_patience_count -= 1
 
+                        if current_patience_count <= 0:
+                            tqdm.write(
+                                f"  (Run {run_counter}) Early stopping attivato all'epoca {epoch}."
+                            )
+                            break
 
-    # --- 7. Valutazione Finale sul Test Set ---
-    print(f"\nValutazione {config_name} sul Test set finale...")
-    if best_model_state_dict:
-        print(f"Carico il modello migliore (o l'ultimo stato) per la valutazione sul Test set.")
-        model.load_state_dict(best_model_state_dict)
+                except Exception as e:
+                    tqdm.write(
+                        f"\nERRORE CRITICO durante addestramento run {run_counter} ({config_name}): {e}"
+                    )
+                    # Salva lo stato attuale del modello anche in caso di errore, se esiste
+                    try:
+                        if model:
+                            torch.save(
+                                model.state_dict(),
+                                os.path.join(
+                                    run_output_directory, "last_state_on_error.pth"
+                                ),
+                            )
+                    except Exception as save_e:
+                        tqdm.write(
+                            f"Errore durante salvataggio stato in caso di errore: {save_e}"
+                        )
+                    # Continua al prossimo run (ma potresti voler interrompere tutto)
+                    continue  # Passa al prossimo batch size combination
 
-    # eval_loop sul test set non ha più la barra tqdm interna
-    f1_test, acc_test, loss_test = eval_loop(
-        test_loader, criterion_slots, criterion_intents, model, lang
+                finally:  # Assicura che la barra di tqdm dell'epoca sia completata anche in caso di errore
+                    epoch_iterator.close()
+
+                tqdm.write(f"Addestramento {config_name} completato.")
+                if not best_model_state_dict:
+                    tqdm.write(
+                        "  Attenzione: Nessun modello migliore salvato. Valuto con l'ultimo stato."
+                    )
+                    # In caso di errore o nessun miglioramento, best_model_state_dict potrebbe essere None.
+                    # Assicuriamoci che ci sia qualcosa da caricare, anche se è l'ultimo stato prima dell'early stop.
+                    if epoch_history_data:  # Se almeno un'epoca è stata completata
+                        best_model_state_dict = (
+                            model.state_dict().copy()
+                        )  # Usa lo stato corrente
+                    else:  # Se non è stata completata nemmeno un'epoca (errore subito)
+                        tqdm.write(
+                            "  Nessuno stato modello disponibile per la valutazione finale."
+                        )
+                        # Salta la valutazione finale per questa run e aggiungi risultati vuoti
+                        all_runs_test_results.append(
+                            {
+                                "Config": config_name,
+                                "Dropout Rate": dropout_rate,
+                                "Learning Rate": lr,
+                                "Batch Size Train": batch_size_train,
+                                "Test Slot F1": 0.0,  # Risultati a 0 in caso di fallimento
+                                "Test Intent Acc": 0.0,
+                                "Test Loss": float("inf"),  # Loss infinita
+                            }
+                        )
+                        # Pulisce memoria e passa al prossimo run
+                        del (
+                            model,
+                            optimizer,
+                            best_model_state_dict,
+                            epoch_history_data,
+                            current_train_loader,
+                            dev_loader,
+                            test_loader,
+                        )
+                        if device.type == "cuda":
+                            torch.cuda.empty_cache()
+                        elif device.type == "mps":
+                            torch.mps.empty_cache()
+                        continue  # Passa al prossimo run
+
+                # Valutazione Finale sul Test Set
+                tqdm.write(f"Valutazione {config_name} sul Test set finale...")
+                model.load_state_dict(
+                    best_model_state_dict
+                )  # Carica il migliore o l'ultimo
+
+                f1_test, acc_test, loss_test = eval_loop(
+                    test_loader, criterion_slots, criterion_intents, model, lang
+                )
+
+                tqdm.write(
+                    f"  Risultati Test - {config_name}: F1={f1_test:.4f}, Acc={acc_test:.4f}, Loss={loss_test:.4f}"
+                )
+
+                # Salvataggio Risultati e Plot
+                tqdm.write("Salvataggio storia, risultati finali e grafici...")
+                save_epoch_history(run_output_directory, epoch_history_data)
+                save_test_results(run_output_directory, f1_test, acc_test, loss_test)
+
+                # Plot (i plot sono gli stessi di prima, salvati nella cartella della run)
+                # ... (codice plot invariato) ...
+                # Grafico delle Loss
+                plt.figure(figsize=(10, 6))
+                epochs_plot = (
+                    [d["Epoch"] for d in epoch_history_data]
+                    if epoch_history_data
+                    else []
+                )
+                train_losses_plot = (
+                    [d["Train_Loss"] for d in epoch_history_data]
+                    if epoch_history_data
+                    else []
+                )
+                dev_losses_plot = (
+                    [d["Dev_Loss"] for d in epoch_history_data]
+                    if epoch_history_data
+                    else []
+                )
+                plt.plot(epochs_plot, train_losses_plot, label="Train Loss")
+                plt.plot(epochs_plot, dev_losses_plot, label="Dev Loss")
+                plt.title(f"Andamento Loss - {config_name}")
+                plt.xlabel("Epoche")
+                plt.ylabel("Loss Media (Cross Entropy)")
+                if best_epoch_num > 0:
+                    plt.axvline(
+                        x=best_epoch_num,
+                        color="r",
+                        linestyle="--",
+                        label=f"Best Dev F1 Epoch ({best_epoch_num})",
+                    )
+                plt.legend()
+                plt.grid(True)
+                loss_plot_filepath = os.path.join(
+                    run_output_directory, f"loss_plot.png"
+                )
+                plt.savefig(loss_plot_filepath)
+                plt.close()
+                tqdm.write(f"  Grafico loss salvato: {loss_plot_filepath}")
+
+                # Grafico delle Metriche
+                plt.figure(figsize=(10, 6))
+                dev_f1s_plot = (
+                    [d["Dev_Slot_F1"] for d in epoch_history_data]
+                    if epoch_history_data
+                    else []
+                )
+                dev_accs_plot = (
+                    [d["Dev_Intent_Acc"] for d in epoch_history_data]
+                    if epoch_history_data
+                    else []
+                )
+                plt.plot(epochs_plot, dev_f1s_plot, label="Dev Slot F1")
+                plt.plot(epochs_plot, dev_accs_plot, label="Dev Intent Accuracy")
+                plt.title(f"Andamento Metriche Dev - {config_name}")
+                plt.xlabel("Epoche")
+                plt.ylabel("Score")
+                if best_epoch_num > 0:
+                    plt.axvline(
+                        x=best_epoch_num,
+                        color="r",
+                        linestyle="--",
+                        label=f"Best Dev F1 Epoch ({best_epoch_num})",
+                    )
+                plt.legend()
+                plt.grid(True)
+                metrics_plot_filepath = os.path.join(
+                    run_output_directory, f"metrics_plot.png"
+                )
+                plt.savefig(metrics_plot_filepath)
+                plt.close()
+                tqdm.write(f"  Grafico metriche salvato: {metrics_plot_filepath}")
+
+                # Raccogli i risultati finali di questa run
+                all_runs_test_results.append(
+                    {
+                        "Config": config_name,
+                        "Dropout Rate": dropout_rate,
+                        "Learning Rate": lr,
+                        "Batch Size Train": batch_size_train,
+                        "Test Slot F1": f1_test,
+                        "Test Intent Acc": acc_test,
+                        "Test Loss": loss_test,
+                    }
+                )
+
+                # Pulisce memoria
+                del (
+                    model,
+                    optimizer,
+                    best_model_state_dict,
+                    epoch_history_data,
+                    current_train_loader,  # Pulisci anche i dataloader specifici della run
+                )
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                elif device.type == "mps":
+                    torch.mps.empty_cache()
+
+    # --- 11. Riepilogo Comparativo Finale e HEATMAPS ---
+    print(
+        "\n--- Riepilogo Comparativo Risultati Test (Grid Search Bidirezionale+Dropout) ---"
     )
 
-    # --- 8. Salvataggio Risultati e Plot ---
-    print("\nSalvataggio storia, risultati finali e grafici...")
+    # Crea DataFrame pandas dai risultati raccolti
+    df_results = pd.DataFrame(all_runs_test_results)
 
-    # Salva la storia delle metriche (Train/Dev) per epoca
-    save_epoch_history(run_output_directory, epoch_history_data)
+    # Stampa la tabella riassuntiva
+    print(tabulate(df_results, headers="keys", tablefmt="grid", showindex=False))
 
-    # Salva i risultati finali del Test set
-    save_test_results(run_output_directory, f1_test, acc_test, loss_test)
+    # Salva la tabella riassuntiva completa in un CSV
+    summary_csv_path = os.path.join(
+        base_results_directory, step_directory_name, "grid_search_summary.csv"
+    )
+    df_results.to_csv(summary_csv_path, index=False)
+    print(f"\nRiepilogo completo salvato in: {summary_csv_path}")
 
-    # Genera e salva il grafico delle Loss
-    plt.figure(figsize=(10, 6))
-    epochs_plot = [d['Epoch'] for d in epoch_history_data]
-    train_losses_plot = [d['Train_Loss'] for d in epoch_history_data]
-    dev_losses_plot = [d['Dev_Loss'] for d in epoch_history_data]
+    # --- Generazione Heatmaps ---
+    print("\nGenerazione Heatmaps (valori medi dove applicabile)...")
 
-    plt.plot(epochs_plot, train_losses_plot, label='Train Loss')
-    plt.plot(epochs_plot, dev_losses_plot, label='Dev Loss')
-    plt.title(f'Andamento Loss - {config_name}')
-    plt.xlabel('Epoche')
-    plt.ylabel('Loss Media (Cross Entropy)')
-    if best_epoch_num > 0:
-        plt.axvline(
-            x=best_epoch_num,
-            color="r",
-            linestyle="--",
-            label=f"Best Dev F1 Epoch ({best_epoch_num})",
-        )
-    plt.legend()
-    plt.grid(True)
-    loss_plot_filepath = os.path.join(run_output_directory, f"loss_plot.png")
-    plt.savefig(loss_plot_filepath)
-    print(f"Grafico loss salvato in: {loss_plot_filepath}")
-    plt.close()
-
-    # Genera e salva il grafico delle Metriche (F1 e Accuracy)
-    plt.figure(figsize=(10, 6))
-    dev_f1s_plot = [d['Dev_Slot_F1'] for d in epoch_history_data]
-    dev_accs_plot = [d['Dev_Intent_Acc'] for d in epoch_history_data]
-
-    plt.plot(epochs_plot, dev_f1s_plot, label='Dev Slot F1')
-    plt.plot(epochs_plot, dev_accs_plot, label='Dev Intent Accuracy')
-    plt.title(f'Andamento Metriche Dev - {config_name}')
-    plt.xlabel('Epoche')
-    plt.ylabel('Score')
-    if best_epoch_num > 0:
-        plt.axvline(
-            x=best_epoch_num,
-            color="r",
-            linestyle="--",
-            label=f"Best Dev F1 Epoch ({best_epoch_num})",
-        )
-    plt.legend()
-    plt.grid(True)
-    metrics_plot_filepath = os.path.join(run_output_directory, f"metrics_plot.png")
-    plt.savefig(metrics_plot_filepath)
-    print(f"Grafico metriche salvato in: {metrics_plot_filepath}")
-    plt.close()
-
-    # --- 9. Stampa Risultati Finali con Tabulate ---
-    print("\n--- Risultati Finali sul Test Set ---")
-    test_results_data = [
-        ["Slot Filling F1", f1_test],
-        ["Intent Classification Accuracy", acc_test],
-        ["Loss Media Test", loss_test]
+    # Definisci le metriche da visualizzare
+    metrics_to_plot = ["Test Slot F1", "Test Intent Acc", "Test Loss"]
+    # Definisci le coppie di parametri per gli assi delle heatmap
+    # Useremo sempre Batch Size o Learning Rate sull'asse X e Dropout Rate sull'asse Y
+    # Per Batch Size vs LR, dovremo aggregare sul Dropout Rate
+    param_pairs = [
+        ("Dropout Rate", "Learning Rate", "Batch Size Train"),
+        ("Dropout Rate", "Batch Size Train", "Learning Rate"),
+        (
+            "Learning Rate",
+            "Batch Size Train",
+            "Dropout Rate",
+        ),  # Adattato per Batch vs LR
     ]
-    print(tabulate(test_results_data, headers=["Metrica", "Valore"], tablefmt="grid"))
 
-    print("\nEsecuzione Baseline completata. Controllare la cartella 'results' per i dettagli.")
+    # Directory base per le heatmap
+    heatmap_dir = os.path.join(base_results_directory, step_directory_name, "_heatmaps")
+    os.makedirs(heatmap_dir, exist_ok=True)
 
+    for metric in metrics_to_plot:
+        metric_safe_name = metric.replace(" ", "_")  # Nome sicuro per file
+        for idx_param, col_param, agg_param in param_pairs:
+            # Assicurati che la combinazione di colonne esista nel DataFrame
+            if (
+                idx_param in df_results.columns
+                and col_param in df_results.columns
+                and agg_param in df_results.columns
+            ):
+                try:
+                    # Crea la tabella pivot, aggregando con la media sulla dimensione non visualizzata
+                    pivot_table = pd.pivot_table(
+                        df_results,
+                        values=metric,
+                        index=idx_param,
+                        columns=col_param,
+                        aggfunc=np.mean,
+                    )
+
+                    # Adatta dimensione figura
+                    fig_width = max(6, len(pivot_table.columns) * 1.5 + 3)
+                    fig_height = max(4, len(pivot_table.index) * 0.8 + 2)
+                    plt.figure(figsize=(fig_width, fig_height))
+
+                    # Per la loss, un cmap diverso può essere migliore
+                    cmap_val = (
+                        "viridis" if "F1" in metric or "Acc" in metric else "YlGnBu_r"
+                    )  # YlGnBu_r è invertito, per Loss decrescente
+                    sns.heatmap(
+                        pivot_table,
+                        annot=True,
+                        fmt=".4f",
+                        cmap=cmap_val,
+                        linewidths=0.5,
+                    )
+                    plt.title(
+                        f"{metric} vs {idx_param} & {col_param}\n(Aggregato su {agg_param})",
+                        fontsize=12,
+                    )
+                    plt.xlabel(col_param, fontsize=10)
+                    plt.ylabel(idx_param, fontsize=10)
+                    plt.xticks(rotation=45, ha="right")
+                    plt.yticks(rotation=0)
+                    plt.tight_layout()
+
+                    filename = f"heatmap_{metric_safe_name}_vs_{idx_param.replace(' ', '')}_vs_{col_param.replace(' ', '')}.png"
+                    filepath = os.path.join(heatmap_dir, filename)
+                    plt.savefig(filepath)
+                    plt.close()
+                    print(f"  Heatmap salvata: {filepath}")
+                except Exception as e:
+                    print(
+                        f"  Errore durante la generazione della heatmap per {metric} ({idx_param} vs {col_param}): {e}"
+                    )
+            else:
+                print(
+                    f"  Skipping heatmap for {metric} ({idx_param} vs {col_param}): Colonne non trovate nel DataFrame."
+                )
+
+    print("\nGrid Search completata. Controllare la cartella 'results' per i dettagli.")
+
+# --- END OF FILE main.py ---
