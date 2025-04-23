@@ -1,12 +1,10 @@
-# --- START OF FILE main.py ---
-
-# Questo file è usato per eseguire le tue funzioni e stampare i risultati
 
 import os
 import csv
 from pprint import pprint
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+# Rimuoviamo l'import diretto di tqdm qui, lo useremo solo nel loop delle epoche
+# from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -16,8 +14,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
 from collections import Counter
 
-# Importa tabulate
-from tabulate import tabulate
+from tabulate import tabulate # Importato per la tabella finale
 
 # Importa tutto da utils.py
 from utils import *
@@ -33,13 +30,14 @@ except ImportError:
     exit()
 
 
-# --- Funzioni di Training e Valutazione (invariate) ---
+# --- Funzioni di Training e Valutazione (Modificate per rimuovere tqdm interno) ---
 
 def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=5):
-    """Esegue un'epoca di addestramento."""
+    """Esegue un'epoca di addestramento (senza barra tqdm interna sui batch)."""
     model.train()
     loss_array = []
-    for sample in tqdm(data, desc="Training Progress"):
+    # Rimosso tqdm dall'iterazione sui batch
+    for sample in data:
         optimizer.zero_grad()
         slots, intent = model(sample["utterances"], sample["slots_len"])
         loss_intent = criterion_intents(intent, sample["intents"])
@@ -52,13 +50,14 @@ def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=
     return np.mean(loss_array)
 
 def eval_loop(data, criterion_slots, criterion_intents, model, lang):
-    """Esegue la valutazione sul dataset fornito (dev o test)."""
+    """Esegue la valutazione (senza barra tqdm interna sui batch)."""
     model.eval()
     loss_array = []
     ref_intents, hyp_intents = [], []
     ref_slots, hyp_slots = [], []
     with torch.no_grad():
-        for sample in tqdm(data, desc="Evaluation Progress"):
+         # Rimosso tqdm dall'iterazione sui batch
+        for sample in data:
             slots, intents = model(sample["utterances"], sample["slots_len"])
             loss_intent = criterion_intents(intents, sample["intents"])
             loss_slot = criterion_slots(slots, sample["y_slots"])
@@ -200,18 +199,14 @@ if __name__ == "__main__":
     print("DataLoader pronti.")
 
     # --- 5. Definizione Iperparametri ---
-    # Parametri per la configurazione BASELINE
     hid_size = 200
     emb_size = 300
     lr = 0.001
     clip = 5
     n_epochs = 50
     patience = 5
-    # Parametri che definiscono l'architettura (per il nome della cartella)
-    # Mantienili qui anche se non usati direttamente per la baseline ModelIAS
-    # Saranno utili per generare il nome della cartella
-    bidirectional = False
-    dropout_rate = 0.0
+    bidirectional = False # Per nome cartella
+    dropout_rate = 0.0    # Per nome cartella
 
 
     out_slot, out_int, vocab_len = (
@@ -224,47 +219,55 @@ if __name__ == "__main__":
 
     # --- Configurazione Specifica per questa Run (Baseline) ---
     config_name = "BASELINE"
-    # Crea una stringa descrittiva dei parametri per il nome della cartella
-    # Includi solo i parametri rilevanti per questa run, ma puoi aggiungere altri in futuro
+    # Stringa parametri per nome cartella. Puoi aggiungere/togliere parametri qui.
     params_string = f"hid{hid_size}_emb{emb_size}_lr{lr}_p{patience}_bs{batch_size_train}"
+    # Aggiungi parametri architettonici al nome della cartella per i prossimi step
+    params_string += f"_bi{int(bidirectional)}_dr{dropout_rate}".replace('.', '') # Remove dot for filenames
 
-    # Crea le cartelle di output per questa specifica run
     base_results_directory = "results"
-    step_directory_name = "step_baseline" # Nome specifico per lo step 2.A - Baseline
+    step_directory_name = "step_baseline"
     run_output_directory = create_run_output_dir(base_results_directory, step_directory_name, params_string)
 
 
-    # --- 6. Addestramento e Valutazione (Modificato per salvare storia) ---
+    # --- 6. Addestramento e Valutazione (Modificato per output) ---
     print(f"\n--- Esecuzione Configurazione: {config_name} ---")
 
-    # Istanzia il modello BASELINE
     model = ModelIAS(hid_size, out_slot, out_int, emb_size, vocab_len, pad_index=PAD_TOKEN)
     model.to(device)
     model.apply(init_weights)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    epoch_history_data = [] # Lista per salvare i dati per la history CSV
+    epoch_history_data = []
 
     best_f1_dev, current_patience_count, best_epoch_num = 0.0, patience, 0
     best_model_state_dict = None
 
     print(f"Inizio addestramento {config_name} per max {n_epochs} epoche...")
-    for epoch in range(1, n_epochs + 1):
-        print(f"\nEpoca {epoch}/{n_epochs}")
+    # Usiamo tqdm qui per il loop delle epoche
+    epoch_iterator = tqdm(range(1, n_epochs + 1), desc=f"{config_name} Training")
 
-        # Training loop
+    for epoch in epoch_iterator:
+        # Rimosso la stampa \nEpoca X/Y qui, viene gestita dalla descrizione di tqdm
+
+        # Training loop (senza tqdm interno)
         loss_train_epoch = train_loop(
             train_loader, optimizer, criterion_slots, criterion_intents, model, clip
         )
-        print(f"Loss Addestramento Media: {loss_train_epoch:.4f}")
+        # Rimosso la stampa della loss di training qui
 
-        # Evaluation loop on Dev set
+        # Evaluation loop on Dev set (senza tqdm interno)
         f1_dev_epoch, acc_dev_epoch, loss_dev_epoch = eval_loop(
             dev_loader, criterion_slots, criterion_intents, model, lang
         )
-        print(
-            f"Risultati Dev: Loss={loss_dev_epoch:.4f}, Slot F1={f1_dev_epoch:.4f}, Intent Acc={acc_dev_epoch:.4f}"
-        )
+        # Rimosso la stampa dei risultati dev qui
+
+        # Aggiorna la descrizione della barra di progresso di tqdm con i risultati dev
+        epoch_iterator.set_postfix({
+            'TrainLoss': f'{loss_train_epoch:.4f}',
+            'DevLoss': f'{loss_dev_epoch:.4f}',
+            'DevF1': f'{f1_dev_epoch:.4f}',
+            'DevAcc': f'{acc_dev_epoch:.4f}'
+        })
 
         # Salva i dati dell'epoca per la history
         epoch_history_data.append({
@@ -280,16 +283,24 @@ if __name__ == "__main__":
             best_f1_dev = f1_dev_epoch
             best_epoch_num = epoch
             current_patience_count = patience
-            print(f"*** Nuovo miglior F1 Dev! Salvo stato modello (Epoca {epoch}). ***")
+            # Stampiamo solo un messaggio quando si trova un nuovo migliore
+            print(f"\n*** Epoca {epoch}: Nuovo miglior F1 Dev = {best_f1_dev:.4f}. Salvato stato modello. ***")
             best_model_state_dict = model.state_dict().copy()
             torch.save(best_model_state_dict, os.path.join(run_output_directory, 'best_model.pth'))
         else:
             current_patience_count -= 1
-            print(f"Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}")
+            # Stampiamo solo un messaggio quando la pazienza diminuisce, non ad ogni epoca
+            if current_patience_count > 0 and current_patience_count < patience:
+                 if (patience - current_patience_count) % 2 == 0 or current_patience_count == 1: # Stampa meno frequentemente
+                    print(f"\nEpoca {epoch}: Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}")
+
 
         if current_patience_count <= 0:
-            print(f"--- Early stopping attivato all'epoca {epoch}. ---")
+            print(f"\n--- Early stopping attivato all'epoca {epoch}. ---")
             break
+
+    # Assicura che la barra di tqdm dell'epoca sia completata alla fine
+    epoch_iterator.close()
 
     print(f"\nAddestramento {config_name} completato.")
     if best_model_state_dict:
@@ -300,11 +311,12 @@ if __name__ == "__main__":
 
 
     # --- 7. Valutazione Finale sul Test Set ---
-    print(f"\nValutazione {config_name} sul Test set...")
+    print(f"\nValutazione {config_name} sul Test set finale...")
     if best_model_state_dict:
         print(f"Carico il modello migliore (o l'ultimo stato) per la valutazione sul Test set.")
         model.load_state_dict(best_model_state_dict)
 
+    # eval_loop sul test set non ha più la barra tqdm interna
     f1_test, acc_test, loss_test = eval_loop(
         test_loader, criterion_slots, criterion_intents, model, lang
     )
@@ -374,9 +386,7 @@ if __name__ == "__main__":
         ["Intent Classification Accuracy", acc_test],
         ["Loss Media Test", loss_test]
     ]
-    # Stampa la tabella formattata
     print(tabulate(test_results_data, headers=["Metrica", "Valore"], tablefmt="grid"))
 
     print("\nEsecuzione Baseline completata. Controllare la cartella 'results' per i dettagli.")
 
-# --- END OF FILE main.py ---
