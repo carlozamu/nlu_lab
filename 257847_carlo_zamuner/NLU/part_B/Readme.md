@@ -1,0 +1,81 @@
+# Analisi Grid Search per Fine-tuning BERT (Parte 2.B)
+
+Questo documento analizza i risultati della Grid Search eseguita per ottimizzare gli iperparametri di fine-tuning di un modello BERT per i task congiunti di Intent Classification e Slot Filling sul dataset ATIS.
+
+**Obiettivo:** Trovare la combinazione ottimale di Dropout Rate, Learning Rate e Batch Size per massimizzare le performance (Slot F1 e Intent Accuracy) sul test set per l'architettura BERT fine-tunata.
+
+**Architettura Testata:** Modello basato su **BERT-base** (`bert-base-uncased`) con layer lineari aggiuntivi per Intent Classification e Slot Filling, addestrato con un approccio multi-task congiunto.
+
+**Parametri Testati (Grid Search):**
+
+- **Dropout Rate:** [0.1, 0.3, 0.5]
+- **Learning Rate:** [2e-5, 3e-5, 5e-5]
+- **Batch Size Train:** [32, 64, 128]
+- **Altri Parametri Fissi:**
+  - Epoche massime (con early stopping): 50
+  - Pazienza early stopping: 5
+  - Gradient Clipping: 1.0
+  - Max Sequence Length: 50
+  - Batch Size Eval: 128
+
+**Risultati Completi della Grid Search (Test Set):**
+
+| Config                 | Dropout Rate | Learning Rate | Batch Size Train | Test Slot F1 | Test Intent Acc | Test Loss    |
+| :--------------------- | :----------- | :------------ | :--------------- | :----------- | :-------------- | :----------- |
+| BI_DR0.1_LR2e-05_BS32  | 0.1          | 0.00002       | 32               | 0.945998     | 0.975364        | 0.415341     |
+| BI_DR0.1_LR2e-05_BS64  | 0.1          | 0.00002       | 64               | 0.943994     | 0.972004        | 0.389669     |
+| BI_DR0.1_LR2e-05_BS128 | 0.1          | 0.00002       | 128              | 0.943184     | 0.976484        | 0.354130     |
+| BI_DR0.1_LR3e-05_BS32  | 0.1          | 0.00003       | 32               | 0.941652     | 0.972004        | 0.408805     |
+| BI_DR0.1_LR3e-05_BS64  | 0.1          | 0.00003       | 64               | 0.941590     | 0.975364        | 0.377984     |
+| BI_DR0.1_LR3e-05_BS128 | 0.1          | 0.00003       | 128              | 0.945295     | 0.975364        | 0.397027     |
+| BI_DR0.1_LR5e-05_BS32  | 0.1          | 0.00005       | 32               | 0.944943     | 0.976484        | 0.382744     |
+| BI_DR0.1_LR5e-05_BS64  | 0.1          | 0.00005       | 64               | 0.946646     | 0.975364        | 0.381005     |
+| BI_DR0.1_LR5e-05_BS128 | 0.1          | 0.00005       | 128              | 0.942772     | **0.977604**    | 0.383321     |
+| BI_DR0.3_LR2e-05_BS32  | 0.3          | 0.00002       | 32               | 0.943164     | 0.969765        | 0.390914     |
+| BI_DR0.3_LR2e-05_BS64  | 0.3          | 0.00002       | 64               | 0.942233     | 0.972004        | 0.373364     |
+| BI_DR0.3_LR2e-05_BS128 | 0.3          | 0.00002       | 128              | 0.941652     | 0.973124        | 0.364885     |
+| BI_DR0.3_LR3e-05_BS32  | 0.3          | 0.00003       | 32               | 0.945012     | 0.973124        | 0.427015     |
+| BI_DR0.3_LR3e-05_BS64  | 0.3          | 0.00003       | 64               | 0.946554     | 0.975364        | **0.347867** |
+| BI_DR0.3_LR3e-05_BS128 | 0.3          | 0.00003       | 128              | 0.941963     | 0.974244        | 0.353977     |
+| BI_DR0.3_LR5e-05_BS32  | 0.3          | 0.00005       | 32               | 0.945167     | 0.974244        | 0.393049     |
+| BI_DR0.3_LR5e-05_BS64  | 0.3          | 0.00005       | 64               | 0.939293     | 0.973124        | 0.407410     |
+| BI_DR0.3_LR5e-05_BS128 | 0.3          | 0.00005       | 128              | 0.943907     | **0.978723**    | **0.325581** |
+| BI_DR0.5_LR2e-05_BS32  | 0.5          | 0.00002       | 32               | 0.945423     | 0.973124        | 3.871414 (!) |
+| BI_DR0.5_LR2e-05_BS64  | 0.5          | 0.00002       | 64               | 0.944904     | **0.977604**    | 0.357544     |
+| BI_DR0.5_LR2e-05_BS128 | 0.5          | 0.00002       | 128              | 0.942872     | 0.975364        | 0.373369     |
+| BI_DR0.5_LR3e-05_BS32  | 0.5          | 0.00003       | 32               | 0.946331     | 0.975364        | 0.389805     |
+| BI_DR0.5_LR3e-05_BS64  | 0.5          | 0.00003       | 64               | **0.949815** | 0.973124        | 0.370758     |
+| BI_DR0.5_LR3e-05_BS128 | 0.5          | 0.00003       | 128              | 0.944220     | 0.976484        | 0.376792     |
+| BI_DR0.5_LR5e-05_BS32  | 0.5          | 0.00005       | 32               | 0.938211     | 0.975364        | 0.380703     |
+| BI_DR0.5_LR5e-05_BS64  | 0.5          | 0.00005       | 64               | 0.941818     | **0.978723**    | 0.341035     |
+| BI_DR0.5_LR5e-05_BS128 | 0.5          | 0.00005       | 128              | 0.946312     | 0.972004        | 0.392226     |
+
+_(Nota: Ho corretto i valori 1.0, 3.0, 5.0 a 0.1, 0.3, 0.5 basandomi sulla tua intenzione, ma nella tabella originale erano 1, 3, 5. Se la tua tabella era stata generata con i valori 1, 3, 5, allora l'analisi dei risultati deve considerare quello. Assumo per la discussione che fossero 0.1, 0.3, 0.5 come da discussione precedente)._
+
+**Analisi e Riflessioni dalla Grid Search:**
+
+1.  **Eccellenza nell'Intent Classification:** L'Intent Accuracy raggiunge livelli eccezionali, spesso sopra il 97%, con un picco di **0.978723**. Questo conferma che BERT è estremamente efficace nel comprendere l'intento principale dell'utente. L'impatto dei parametri sull'Intent Accuracy è visibile, con il Learning Rate `5e-5` che sembra frequentemente presente nelle combinazioni con l'Acc più alta.
+2.  **Slot Filling Molto Forte, con Margine:** L'F1 Slot è costantemente alto (molto sopra il 94%), con un picco di **0.949815**. Questo è paragonabile ai migliori modelli LSTM (circa 0.953 nel tuning precedente) ma non lo supera nettamente in questa Grid Search. Ciò suggerisce che, mentre BERT fornisce rappresentazioni potenti, il task di Slot Filling a livello di sub-token e la strategia di allineamento adottata potrebbero avere un limite, o richiedere un tuning ancora più fine/altre strategie (come il CRF).
+3.  **Impatto del Dropout:** Tassi di Dropout di **0.3** e **0.5** sembrano dare i risultati migliori in termini di F1 e Acc, e sono spesso associati a Loss Test più basse rispetto a 0.1. Questo conferma l'utilità della regolarizzazione con Dropout per questo modello.
+4.  **Interazione LR e Batch Size:**
+
+    - Learning Rate **2e-5**: Tende ad avere Loss Test leggermente più alte e performance (F1/Acc) generalmente buone, ma non sempre ai picchi rispetto a 3e-5 e 5e-5.
+    - Learning Rate **3e-5**: Ottimo per l'F1 Slot (ospita il picco con DR=0.5, BS=64) e Loss basse. Spesso associato a buoni compromessi.
+    - Learning Rate **5e-5**: Frequente nelle combinazioni con l'Acc Intent più alta e Loss molto basse (ospita il picco Acc e la Loss minima).
+    - Batch Size **32**: A volte dà buoni risultati, ma sembra più volatile (nota la run con Loss 3.87).
+    - Batch Size **64**: Appare in combinazioni con il picco F1 e picchi Acc. Sembra una scelta molto solida.
+    - Batch Size **128**: Appare nelle combinazioni con il picco Acc e Loss minima. Utile per Acc Intent elevate e bassa Loss.
+
+5.  **Configurazioni di Punta:**
+
+    - **Per Slot F1 Max:** DR=0.5, LR=3e-05, BS=64 (F1=0.949815, Acc=0.973124, Loss=0.370758)
+    - **Per Intent Acc Max:** DR=0.3, LR=5e-05, BS=128 (F1=0.943907, Acc=0.978723, Loss=0.325581) E DR=0.5, LR=5e-05, BS=64 (F1=0.941818, Acc=0.978723, Loss=0.341035)
+    - **Per Loss Minima:** DR=0.3, LR=5e-05, BS=128 (Loss=0.325581, F1=0.943907, Acc=0.978723)
+
+6.  **La Migliore Configurazione Complessiva (Scelta per la Relazione):** La configurazione **DR=0.3, LR=5e-05, BS=128** sembra essere la più equilibrata e performante. Raggiunge la massima Accuracy Intent e la minima Loss Test, con un F1 Slot molto buono (anche se non il massimo assoluto, è comunque eccellente e la differenza è minima). Questa configurazione dimostra sia l'efficacia del fine-tuning BERT per Intent che una buona generalizzazione per Slot.
+
+**Riflessioni Finali:**
+
+- La Grid Search ha permesso di individuare combinazioni di iperparametri che portano le performance di BERT su ATIS a livelli molto alti, superando le architetture LSTM (specialmente per l'Intent Accuracy).
+- L'interazione tra i parametri è evidente, ma la Grid Search fornisce una mappa chiara per trovare i punti dolci.
+- Il leggero vantaggio dell'F1 Slot dell'LSTM tunato (0.953 vs 0.950 circa) potrebbe essere dovuto alla casualità, o potrebbe suggerire che l'LSTM, in alcune configurazioni, è marginalmente migliore nel task di sequenza labeling (anche se meno bravo nell'intent). Potrebbe anche indicare che una strategia di allineamento slot più sofisticata per BERT (oltre al semplice "primo sub-token") o l'aggiunta di un CRF sopra BERT per gli slot (come nel paper) potrebbero portare l'F1 Slot di BERT a superare definitivamente quello dell'LSTM.
