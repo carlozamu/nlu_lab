@@ -1,8 +1,8 @@
 # --- START OF FILE main.py ---
 
 # Questo file è usato per eseguire le tue funzioni e stampare i risultati
-# Implementazione per la Parte 2.B: Fine-tuning BERT-large per Joint Intent & Slot
-# Esegue un singolo run con parametri fissi
+# Implementazione per la Parte 2.B: Fine-tuning BERT-base per Joint Intent & Slot
+# Esegue un singolo run con la MIGLIORE configurazione trovata dalla Grid Search
 
 import os
 import csv
@@ -43,7 +43,6 @@ from transformers import BertTokenizerFast
 
 # --- Funzioni di Training e Valutazione ADATTATE per BERT (invariate) ---
 # train_loop e eval_loop rimangono le stesse
-
 
 def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=1.0):
     """Esegue un'epoca di addestramento per il modello BERT."""
@@ -183,6 +182,7 @@ def eval_loop(data, criterion_slots, criterion_intents, model, lang, tokenizer):
 
 # --- Funzioni per la gestione dei risultati e delle cartelle (simili a prima) ---
 def create_run_output_dir(base_results_dir, step_name, run_params_str):
+    """Crea la struttura di directory per salvare i risultati di una run."""
     run_dir = os.path.join(base_results_dir, step_name, run_params_str)
     os.makedirs(run_dir, exist_ok=True)
     tqdm.write(f"Risultati per questa run verranno salvati in: {run_dir}")
@@ -258,54 +258,50 @@ if __name__ == "__main__":
     print(f"Slot: {len(lang.slot2id)} etichette")
     print(f"Intenti: {len(lang.intent2id)} etichette")
 
-    # --- 2. Inizializzazione Tokenizer BERT ---
-    print("\nInizializzazione BertTokenizer...")
-    tokenizer_name = "bert-base-uncased" # Modificheremo questo per BERT-large
-    tokenizer = BertTokenizerFast.from_pretrained(tokenizer_name)
-    print(f"BertTokenizer type: {type(tokenizer)}")
-    print(f"BertTokenizer vocab size: {len(tokenizer)}")
-    print(f"BertTokenizer [PAD] token ID: {tokenizer.pad_token_id}")
-
 
     # ===========================================================
     # --- SEZIONE PARAMETRI DI FINE-TUNING MODIFICABILI ---
-    # --- Configurazione per BERT-large (Singolo Run) ---
+    # --- Configurazione per BERT-base (Singolo Run) ---
+    # --- Utilizza la migliore configurazione dalla Grid Search ---
     # ===========================================================
 
     # --- Parametri Generali ---
-    n_epochs = 100           # Numero massimo di epoche
+    n_epochs = 50           # Numero massimo di epoche per early stopping
     patience = 10           # Pazienza per l'early stopping (basato su Dev F1)
     clip = 1.0              # Valore per gradient clipping (tipico 1.0 per BERT)
     max_seq_length = 50     # Lunghezza massima sequenza tokenizzata BERT (come nel paper)
 
-    # --- Parametri Specifici del Modello (BERT-large) e Ottimizzatore ---
-    bert_model_name = 'bert-large-uncased' # <-- MODIFICA QUI per BERT-large
-    # Learning Rate tipico per BERT-large può essere leggermente più basso del base
-    lr_fixed = 5e-5  # Puoi provare 2e-5, 3e-5, 5e-5 (5e-5 era nel paper per base)
-    bert_dropout_rate_fixed = 0.1 # Tasso di Dropout (come nel paper per base)
-    # Batch size per BERT-large può essere più piccolo se la memoria è limitata
-    batch_size_train_fixed = 64 # Iniziamo con 64 per BERT-large per gestire memoria
-    batch_size_eval_fixed = 64  # Usa lo stesso per valutazione
+    # --- Parametri Specifici del Modello (BERT-base) e Ottimizzatore ---
+    bert_model_name = 'bert-base-uncased' # <-- Modello BERT-base
+
+    # Parametri della MIGLIORE configurazione trovata nella Grid Search per BERT-base
+    # Basato sulla tua Grid Search, la configurazione DR=0.3, LR=5e-05, BS=128 ha dato Acc max e Loss min
+    lr_fixed = 5e-5         # Learning Rate
+    bert_dropout_rate_fixed = 0.3 # Tasso di Dropout
+    batch_size_train_fixed = 128 # Batch size per il training
+    batch_size_eval_fixed = 128 # Batch size per valutazione
 
     # --- Parametri per Nomi Cartelle e File ---
     base_results_directory = "results"
-    # Nome specifico per il run di BERT-large con parametri fissi
-    step_directory_name = "step_bert_large_finetuning_run1"
+    # Nome specifico per il run di BERT-base con la migliore configurazione
+    step_directory_name = "step_bert_base_finetuning_best_run"
 
     # ===========================================================
     # --- FINE SEZIONE PARAMETRI MODIFICABILI ---
     # ===========================================================
 
+    # --- 2. Inizializzazione Tokenizer BERT ---
+    print("\nInizializzazione BertTokenizer...")
+    # Il tokenizer deve corrispondere al modello base
+    tokenizer = BertTokenizerFast.from_pretrained(bert_model_name) # <-- Inizializza tokenizer con nome modello BASE
+    print(f"BertTokenizer type: {type(tokenizer)}")
+    print(f"BertTokenizer vocab size: {len(tokenizer)}")
+    print(f"BertTokenizer [PAD] token ID: {tokenizer.pad_token_id}")
+
 
     # --- 3. Creazione Dataset e DataLoader (ADATTATI per BERT) ---
     # Usa i parametri definiti sopra
     print("Creazione Dataset e DataLoader (BERT compatible)...")
-    # Il tokenizer deve corrispondere al modello usato (bert-large-uncased usa lo stesso tokenizer)
-    # Quindi ri-inizializziamo il tokenizer Fast qui per sicurezza, usando il nome del modello LARGE
-    tokenizer = BertTokenizerFast.from_pretrained(bert_model_name) # <-- Re-inizializza tokenizer con nome modello LARGE
-    print(f"BertTokenizer type (after model name change): {type(tokenizer)}")
-    print(f"BertTokenizer vocab size (after model name change): {len(tokenizer)}")
-
 
     train_dataset = IntentsAndSlotsBERT(train_raw, lang, tokenizer, max_len=max_seq_length)
     dev_dataset = IntentsAndSlotsBERT(dev_raw, lang, tokenizer, max_len=max_seq_length)
@@ -327,7 +323,6 @@ if __name__ == "__main__":
     num_intent_labels = len(lang.intent2id)
     num_slot_labels = len(lang.slot2id)
 
-    # Istanzia il modello BERT-large
     model = JointBERTModel(num_intent_labels, num_slot_labels, bert_model_name=bert_model_name, dropout_rate=bert_dropout_rate_fixed)
     model.to(device)
 
@@ -348,7 +343,7 @@ if __name__ == "__main__":
 
 
     # --- 6. Addestramento e Valutazione (BERT) ---
-    print(f"\n--- Inizio Fine-tuning BERT-large ---")
+    print(f"\n--- Inizio Fine-tuning {bert_model_name} ---")
 
     epoch_history_data = []
 
@@ -357,7 +352,7 @@ if __name__ == "__main__":
 
 
     tqdm.write(f"Inizio fine-tuning per max {n_epochs} epoche...")
-    epoch_iterator = tqdm(range(1, n_epochs + 1), desc=f"BERT-large Fine-tuning", leave=True)
+    epoch_iterator = tqdm(range(1, n_epochs + 1), desc=f"{bert_model_name} Fine-tuning", leave=True)
 
     try:
         for epoch in epoch_iterator:
@@ -427,7 +422,7 @@ if __name__ == "__main__":
          tqdm.write("Attenzione: Addestramento fallito o interrotto subito. Impossibile eseguire valutazione finale.")
 
 
-    # --- 7. Valutazione Finale sul Test Set ---
+    # --- 7. Valutazione Finale sul Test set ---
     if best_model_state_dict:
         print(f"\nValutazione finale sul Test set...")
         try:
@@ -471,7 +466,7 @@ if __name__ == "__main__":
         plt.figure(figsize=(10, 6))
         epochs_plot = [d["Epoch"] for d in epoch_history_data]
         train_losses_plot = [d["Train_Loss"] for d in epoch_history_data]
-        dev_losses_plot = [d["Dev_Loss"] for d in epoch_history_data]
+        dev_losses_plot = [d["Dev_Loss"] for d in epoch["Dev_Loss"] for d in epoch_history_data]
         plt.plot(epochs_plot, train_losses_plot, label="Train Loss")
         plt.plot(epochs_plot, dev_losses_plot, label="Dev Loss")
         plt.title(f"Andamento Loss - {config_name_final}")
