@@ -1,6 +1,5 @@
 import torch
 import torch.utils.data as data
-# Rimosso: functools, DataLoader
 
 
 # Funzione originale read_file
@@ -30,13 +29,10 @@ def get_vocab(corpus, special_tokens=[]):
 # Classe originale Lang
 class Lang:
     def __init__(self, corpus, special_tokens=[]):
-        self.word2id = self.get_vocab(
-            corpus, special_tokens
-        )  # Chiama il metodo interno
+        self.word2id = self.get_vocab(corpus, special_tokens)
         self.id2word = {v: k for k, v in self.word2id.items()}
 
-    # Metodo originale get_vocab interno alla classe
-    def get_vocab(self, corpus, special_tokens=[]):
+    def get_vocab(self, corpus, special_tokens=[]):  # Metodo duplicato originale
         output = {}
         i = 0
         for st in special_tokens:
@@ -53,23 +49,24 @@ class Lang:
 # Classe originale PennTreeBank
 class PennTreeBank(data.Dataset):
     def __init__(self, corpus, lang):
-        self.source = []
-        self.target = []
+        self.source, self.target = [], []
         for sentence in corpus:
-            self.source.append(sentence.split()[0:-1])
-            self.target.append(sentence.split()[1:])
-        # Usa metodo originale mapping_seq
+            tokens = sentence.split()
+            if len(tokens) > 1:  # Evita righe vuote
+                self.source.append(tokens[0:-1])
+                self.target.append(tokens[1:])
         self.source_ids = self.mapping_seq(self.source, lang)
         self.target_ids = self.mapping_seq(self.target, lang)
 
     def __len__(self):
-        return len(self.source)  # Usa self.source originale
+        return len(
+            self.source_ids
+        )  # Usa source_ids per lunghezza corretta post-mapping
 
     def __getitem__(self, idx):
         src = torch.LongTensor(self.source_ids[idx])
         trg = torch.LongTensor(self.target_ids[idx])
-        sample = {"source": src, "target": trg}
-        return sample
+        return {"source": src, "target": trg}
 
     # Metodo originale mapping_seq
     def mapping_seq(self, data, lang):
@@ -80,40 +77,36 @@ class PennTreeBank(data.Dataset):
                 if x in lang.word2id:
                     tmp_seq.append(lang.word2id[x])
                 else:
-                    # Gestione OOV originale (solo stampa)
                     print("OOV found!")
-                    print("You have to deal with that")
-                    # Se si verifica OOV, la sequenza viene aggiunta parzialmente
-                    # Questo potrebbe causare problemi o mascherarli.
-                    break  # Interrompe il loop interno per questa sequenza
-            # Aggiunge tmp_seq a res, anche se incompleta in caso di OOV
+                    print("Handle OOV!")
+                    break
             res.append(tmp_seq)
+        # Ritorna lista, potrebbe avere seq vuote se OOV trovato e break usato
         return res
 
 
 # Funzione originale collate_fn
 def collate_fn(data, pad_token, DEVICE):  # Accetta pad_token e DEVICE
-    # Funzione interna originale merge
     def merge(sequences):
         lengths = [len(seq) for seq in sequences]
         max_len = 1 if max(lengths) == 0 else max(lengths)
-        # Usa pad_token (che è l'ID) per riempire
         padded_seqs = torch.LongTensor(len(sequences), max_len).fill_(pad_token)
         for i, seq in enumerate(sequences):
             end = lengths[i]
             padded_seqs[i, :end] = seq
-        # Rimosso detach() perché non necessario se si crea nuovo tensore
         return padded_seqs, lengths
 
     data.sort(key=lambda x: len(x["source"]), reverse=True)
     new_item = {}
+    # Assunzione: data[0] esiste (batch non vuoto)
+    if not data:
+        return None  # Gestisce batch vuoto
     for key in data[0].keys():
         new_item[key] = [d[key] for d in data]
 
     source, _ = merge(new_item["source"])
     target, lengths = merge(new_item["target"])
 
-    # Sposta su DEVICE e calcola numero token
     new_item["source"] = source.to(DEVICE)
     new_item["target"] = target.to(DEVICE)
     new_item["number_tokens"] = sum(lengths)

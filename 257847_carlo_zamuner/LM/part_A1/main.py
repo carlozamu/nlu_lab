@@ -15,6 +15,7 @@ try:
     # Usa le funzioni standard, ma il modello LM_LSTM_Base
     from functions import train_loop, eval_loop, init_weights
     from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
+
     # --- MODIFICA PRINCIPALE: Importa il modello BASE ---
     from model import LM_LSTM_Base
 except ImportError as e:
@@ -31,10 +32,10 @@ if __name__ == "__main__":
     model_save_dir = "bin"
 
     # --- Parametri Fissi Configurazione Migliore A1 ---
-    lr = 1.5 # LR ottimale per A1
-    batch_size = 16 # BS ottimale per A1
+    lr = 1.5  # LR ottimale per A1
+    batch_size = 16  # BS ottimale per A1
     hid = 300
-    emb = 200 # Embedding size originale per A1
+    emb = 200  # Embedding size originale per A1
     clip = 5
     n_epochs = 100
     patience_setting = 3
@@ -67,25 +68,33 @@ if __name__ == "__main__":
 
     # --- DataLoader ---
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE), # Usa nome originale 'pad_token'
-        drop_last=True
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=partial(
+            collate_fn, pad_token=pad_token_id, DEVICE=DEVICE
+        ),  # Usa nome originale 'pad_token'
+        drop_last=True,
     )
     dev_loader = DataLoader(
-        dev_dataset, batch_size=batch_size * 2,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE)
+        dev_dataset,
+        batch_size=batch_size * 2,
+        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE),
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=batch_size * 2,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE)
+        test_dataset,
+        batch_size=batch_size * 2,
+        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE),
     )
 
     # --- Modello, Optimizer, Loss ---
     print("Initializing Model, Optimizer, Loss...")
     # --- MODIFICA: Usa il modello BASE ---
     model = LM_LSTM_Base(
-        emb_size=emb, hidden_size=hid, output_size=vocab_len,
-        pad_index=pad_token_id
+        emb_size=emb,
+        hidden_size=hid,
+        output_size=vocab_len,
+        pad_index=pad_token_id,
         # Non ha argomenti dropout
     ).to(DEVICE)
     model.apply(init_weights)
@@ -108,7 +117,11 @@ if __name__ == "__main__":
         model.train()
         # --- MODIFICA: Passa 'clip' come nell'originale functions.py ---
         train_loss = train_loop(
-            train_loader, optimizer, criterion_train, model, clip=clip
+            train_loader,
+            optimizer,
+            criterion_train,
+            model,
+            clip_value=clip,
         )
 
         model.eval()
@@ -137,7 +150,7 @@ if __name__ == "__main__":
         model.load_state_dict(best_model_state_dict)
         model.eval()
         with torch.no_grad():
-             final_test_ppl, _ = eval_loop(test_loader, criterion_eval, model)
+            final_test_ppl, _ = eval_loop(test_loader, criterion_eval, model)
         print(f"   Best Dev PPL achieved: {best_dev_ppl:.4f}")
         print(f"   Final Test PPL: {final_test_ppl:.4f}")
 
