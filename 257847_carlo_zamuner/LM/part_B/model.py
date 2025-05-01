@@ -18,7 +18,7 @@ class LockedDropout(nn.Module):
         mask = torch.bernoulli(
             torch.full(mask_shape, keep_prob, device=x.device, dtype=x.dtype)
         )
-        mask = mask / keep_prob
+        mask = mask / keep_prob  # Inverted dropout
         return x * mask
 
 
@@ -54,13 +54,12 @@ class LM_LSTM_VarDropWT(nn.Module):
         lstm_out_dropped = self.lockdrop_o(lstm_out)
         output_logits = self.output(lstm_out_dropped)
         output = output_logits.permute(0, 2, 1)
-        return output, hidden_out  # Restituisce output e hidden
+        return output, hidden_out
 
 
-# --- Modelli per altri step (mantenerli se necessario) ---
-# Modello LSTM Base (Step A1)
+# --- Modelli per altri step ---
 class LM_LSTM_Base(nn.Module):
-    """LSTM base senza dropout aggiuntivo (per Step A1)."""
+    """LSTM base (per Step A1)."""
 
     def __init__(self, emb_size, hidden_size, output_size, pad_index=0, n_layers=1):
         super(LM_LSTM_Base, self).__init__()
@@ -75,9 +74,8 @@ class LM_LSTM_Base(nn.Module):
         return output
 
 
-# Modello LSTM con Dropout standard (Step A2/A3)
 class LM_LSTM_With_Dropout(nn.Module):
-    """LSTM con Dropout standard."""
+    """LSTM con Dropout standard (per Step A2/A3)."""
 
     def __init__(
         self,
@@ -101,12 +99,10 @@ class LM_LSTM_With_Dropout(nn.Module):
         emb_dropped = self.dropout_emb(emb)
         lstm_out, _ = self.lstm(emb_dropped)
         out_dropped = self.dropout_fc(lstm_out)
-        output_logits = self.output(out_dropped)
-        output = output_logits.permute(0, 2, 1)
-        return output  # Restituisce solo output
+        output = self.output(out_dropped).permute(0, 2, 1)
+        return output
 
 
-# Modello LSTM con Weight Tying (Step B1)
 class LM_LSTM_WeightTying(nn.Module):
     """LSTM con Weight Tying (per Step B1)."""
 
@@ -121,6 +117,5 @@ class LM_LSTM_WeightTying(nn.Module):
     def forward(self, input_sequence):
         emb = self.embedding(input_sequence)
         lstm_out, _ = self.lstm(emb)
-        output_logits = self.output(lstm_out)
-        output = output_logits.permute(0, 2, 1)
+        output = self.output(lstm_out).permute(0, 2, 1)
         return output

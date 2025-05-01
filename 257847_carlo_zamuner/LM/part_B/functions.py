@@ -5,57 +5,90 @@ import math
 
 # Esegue un'epoca di addestramento
 def train_loop(data_loader, optimizer, criterion_train, model, clip_value=5):
-    """Addestra il modello per un'epoca."""
     model.train()
     total_loss = 0
     total_tokens = 0
 
     for batch in data_loader:
         optimizer.zero_grad()
-        predictions_raw, *_ = model(batch["source"])  # Gestisce output tupla/tensore
+        # Gestisce output modello (tupla o tensore)
+        model_output = model(batch["source"])
+        predictions_raw = (
+            model_output[0] if isinstance(model_output, tuple) else model_output
+        )
+
+        if predictions_raw.dim() != 3:
+            print(
+                f"ERRORE train_loop: Output modello non 3D! Shape: {predictions_raw.shape}. Salto batch."
+            )
+            continue
+
+        # Reshape per CrossEntropyLoss
         vocab_size = predictions_raw.size(1)
         predictions_flat = predictions_raw.permute(0, 2, 1).reshape(-1, vocab_size)
         target_flat = batch["target"].reshape(-1)
 
-        loss = criterion_train(predictions_flat, target_flat)
-        # Usa number_tokens per ponderare correttamente la loss media
-        if criterion_train.reduction == "mean":
-            weighted_loss = loss.item() * batch["number_tokens"]
-        else:
-            print(
-                "Warning: criterion_train reduction is not 'mean'. Loss averaging might be approximate."
-            )
-            weighted_loss = loss.item()
+        try:
+            loss = criterion_train(predictions_flat, target_flat)
 
-        total_loss += weighted_loss
-        total_tokens += batch["number_tokens"]
+            # Accumula loss ponderata
+            if criterion_train.reduction == "mean":
+                weighted_loss = loss.item() * batch["number_tokens"]
+            else:  # Gestione approssimata per 'sum' o 'none'
+                weighted_loss = (
+                    loss.item() * batch["number_tokens"] / target_flat.size(0)
+                    if target_flat.size(0) > 0
+                    else 0
+                )
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-        optimizer.step()
+            total_loss += weighted_loss
+            total_tokens += batch["number_tokens"]
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            optimizer.step()
+        except Exception as e:
+            print(f"\nErrore calcolo loss/backprop (Batch): {e}")
+            continue
 
     if total_tokens == 0:
         return 0.0
     return total_loss / total_tokens
 
 
-# Esegue la valutazione (calcola PPL e loss media)
+# Esegue la valutazione
 def eval_loop(data_loader, criterion_eval, model):
-    """Valuta il modello su un dataset (PPL e loss)."""
     model.eval()
     total_loss = 0
     total_tokens = 0
 
     with torch.no_grad():
         for batch in data_loader:
-            predictions_raw, *_ = model(batch["source"])
-            vocab_size = predictions_raw.size(1)
-            predictions_flat = predictions_raw.permute(0, 2, 1).reshape(-1, vocab_size)
-            target_flat = batch["target"].reshape(-1)
+            try:
+                model_output = model(batch["source"])
+                predictions_raw = (
+                    model_output[0] if isinstance(model_output, tuple) else model_output
+                )
 
-            loss = criterion_eval(predictions_flat, target_flat)  # reduction='sum'
-            total_loss += loss.item()
-            total_tokens += batch["number_tokens"]
+                if predictions_raw.dim() != 3:
+                    print(
+                        f"ERRORE eval_loop: Output modello non 3D! Shape: {predictions_raw.shape}. Salto batch."
+                    )
+                    continue
+
+                # Reshape per CrossEntropyLoss
+                vocab_size = predictions_raw.size(1)
+                predictions_flat = predictions_raw.permute(0, 2, 1).reshape(
+                    -1, vocab_size
+                )
+                target_flat = batch["target"].reshape(-1)
+
+                loss = criterion_eval(predictions_flat, target_flat)  # reduction='sum'
+                total_loss += loss.item()
+                total_tokens += batch["number_tokens"]
+            except Exception as e:
+                print(f"\nErrore durante valutazione (Batch): {e}")
+                continue
 
     if total_tokens == 0:
         return float("inf"), float("inf")
@@ -67,13 +100,11 @@ def eval_loop(data_loader, criterion_eval, model):
     return ppl, avg_loss
 
 
-# Inizializza i pesi del modello (per usare con model.apply)
+# Inizializzazione pesi
 def init_weights(m):
-    """Inizializza pesi per modulo: Emb Unif[-0.1,0.1], LSTM Xavier/Ortho, Linear Unif."""
     EMB_INIT_RANGE = 0.1
     LINEAR_INIT_RANGE = 0.01
     classname = m.__class__.__name__
-
     if isinstance(m, nn.Embedding):
         nn.init.uniform_(m.weight, -EMB_INIT_RANGE, EMB_INIT_RANGE)
         if m.padding_idx is not None:
