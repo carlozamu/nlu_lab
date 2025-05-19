@@ -1,5 +1,3 @@
-# Esegue le 3 configurazioni migliori della Parte 1.B e salva i modelli.
-# Configs: B1(LSTM+WT+SGD), B3_preFT(LSTM+WT+VarDrop+NTAvSGD), B3_FT(FineTuned B3)
 
 import torch
 import torch.nn as nn
@@ -7,34 +5,45 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import math
 import copy
-from functools import partial
+from functools import partial # Kept for DataLoader collate_fn
 import os
 from tqdm import tqdm
 
-# Import Moduli Custom (versioni corrette/pulite)
+# Custom module imports
 try:
     from functions import train_loop, eval_loop, init_weights
     from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
-    # Importa TUTTI i modelli necessari per la Parte B
+    # Import all necessary models for Part B
     from model import LM_LSTM_WeightTying, LM_LSTM_VarDropWT
 except ImportError as e:
-    print(f"Errore importazione moduli: {e}. Assicurati che siano accessibili.")
+    print(f"Error importing modules: {e}. Ensure they are accessible.")
     exit()
 
-# --- Funzione Helper per Eseguire una Configurazione ---
-def run_and_save_config(config):
-    """Esegue un addestramento con la configurazione data e salva il miglior modello."""
+# ==============================================================================
+# --- HELPER FUNCTION TO RUN A SINGLE CONFIGURATION ---
+# ==============================================================================
+def run_and_save_config(config, global_data):
+    """
+    Trains a model with the given configuration and saves the best performing state.
+
+    Args:
+        config (dict): Dictionary containing all parameters for the run.
+        global_data (dict): Dictionary containing pre-loaded data (datasets, lang, etc.).
+    """
     DEVICE = config['device']
-    print(f"\n{'='*10} Starting: {config['experiment_step']} {'='*10}")
-    print(f"   Config: LR={config['lr']}, BS={config['batch_size']}, Patience={config.get('patience', 'N/A')}, Trigger={config.get('trigger', 'N/A')}")
+    print(f"\n{'='*20} Starting: {config['experiment_step']} {'='*20}")
+    print(f"   Config: LR={config['lr']}, BS={config['batch_size']}, "
+          f"Patience={config.get('patience', 'N/A')}, Trigger={config.get('trigger', 'N/A')}")
     print(f"   Model: {config['model_class'].__name__}, Optim: {config['optimizer_name']}")
 
-    # --- Dati (caricati una volta all'inizio) ---
-    # Assumiamo che lang, vocab_len, pad_token_id, train_dataset, dev_dataset, test_dataset
-    # siano disponibili nello scope globale o passati come argomenti.
-    # Per semplicità, li assumiamo globali in questo esempio.
+    # Unpack global data
+    train_dataset = global_data['train_dataset']
+    dev_dataset = global_data['dev_dataset']
+    test_dataset = global_data['test_dataset']
+    vocab_len = global_data['vocab_len']
+    pad_token_id = global_data['pad_token_id']
 
-    # --- DataLoader ---
+    # --- DataLoader Creation ---
     train_loader = DataLoader(
         train_dataset, batch_size=config['batch_size'], shuffle=True,
         collate_fn=partial(collate_fn, pad_token_id=pad_token_id, device=DEVICE),
@@ -49,17 +58,15 @@ def run_and_save_config(config):
         collate_fn=partial(collate_fn, pad_token_id=pad_token_id, device=DEVICE)
     )
 
-    # --- Modello ---
+    # --- Model Initialization ---
     print("Initializing Model, Optimizer, Loss...")
-    # Istanzia il modello corretto in base alla configurazione
     model_params = {
         'emb_size': config['emb'],
         'hidden_size': config['hid'],
         'output_size': vocab_len,
         'pad_index': pad_token_id,
-        'n_layers': 1 # Assumiamo 1 layer
+        'n_layers': 1 # Assuming 1 layer for all models in Part B
     }
-    # Aggiungi parametri specifici per VarDropWT se necessario
     if config['model_class'] == LM_LSTM_VarDropWT:
         model_params['dropoute'] = config['dropoute']
         model_params['dropouto'] = config['dropouto']
@@ -67,22 +74,20 @@ def run_and_save_config(config):
     model = config['model_class'](**model_params).to(DEVICE)
     model.apply(init_weights)
 
-    # --- Optimizer e Loss ---
-    if config['optimizer_name'].startswith("NT-AvSGD"):
-        optimizer = optim.SGD(model.parameters(), lr=config['lr']) # Base SGD
-    elif config['optimizer_name'] == "SGD":
-         optimizer = optim.SGD(model.parameters(), lr=config['lr'])
+    # --- Optimizer and Loss Function ---
+    if config['optimizer_name'].startswith("NT-AvSGD") or config['optimizer_name'] == "SGD":
+        optimizer = optim.SGD(model.parameters(), lr=config['lr'])
     else:
-        raise ValueError(f"Optimizer sconosciuto: {config['optimizer_name']}")
+        raise ValueError(f"Unknown optimizer: {config['optimizer_name']}")
 
     criterion_train = nn.CrossEntropyLoss(ignore_index=pad_token_id)
     criterion_eval = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction="sum")
 
-    # --- Training Loop (con logica NT-AvSGD se applicabile) ---
+    # --- Training Loop ---
     print("Starting Training...")
-    patience = config['patience']
-    trigger_setting = config.get('trigger', None) # Ottieni trigger se presente
-    avg_trigger_countdown = trigger_setting if trigger_setting is not None else float('inf') # Evita trigger se non definito
+    current_patience_epochs = config['patience'] # Use 'patience' from config
+    trigger_setting = config.get('trigger')
+    avg_trigger_countdown = trigger_setting if trigger_setting is not None else float('inf')
     is_averaging = False
     avg_model = None
     avg_step_count = 0
@@ -90,34 +95,34 @@ def run_and_save_config(config):
     best_dev_ppl = math.inf
     best_model_state_dict = None
     best_ppl_for_avg_trigger = math.inf
-    epochs_trained = 0
+    # epochs_trained = 0 # Not strictly needed if only using epoch from pbar
     n_epochs = config['n_epochs']
-    clip = config['clip']
+    clip_value = config['clip'] # Use 'clip_value' consistent with functions.py
 
     pbar = tqdm(range(1, n_epochs + 1), desc=f"Epoch ({config['experiment_step']})", leave=False)
     for epoch in pbar:
-        epochs_trained = epoch
+        # epochs_trained = epoch # Update if needed for detailed logging
         model.train()
-        train_loss = train_loop(train_loader, optimizer, criterion_train, model, clip_value=clip)
+        train_loss = train_loop(train_loader, optimizer, criterion_train, model, clip_value=clip_value)
 
-        # Averaging (solo se NT-AvSGD)
-        if is_averaging:
+        # Averaging logic (only if NT-AvSGD is intended)
+        if config['optimizer_name'].startswith("NT-AvSGD") and is_averaging:
             avg_step_count += 1
             with torch.no_grad():
                 for avg_param, param in zip(avg_model.parameters(), model.parameters()):
                     avg_param.data.add_(param.data.to(avg_param.device) - avg_param.data, alpha=1.0 / avg_step_count)
 
-        # Valutazione
-        eval_model_ref = avg_model if is_averaging else model
-        if is_averaging: eval_model_ref.to(DEVICE)
+        # Evaluation
+        eval_model_ref = avg_model if (config['optimizer_name'].startswith("NT-AvSGD") and is_averaging) else model
+        if is_averaging and config['optimizer_name'].startswith("NT-AvSGD"): eval_model_ref.to(DEVICE)
         eval_model_ref.eval()
-        ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, eval_model_ref)
-        if is_averaging: eval_model_ref.to("cpu")
+        ppl_dev, _ = eval_loop(dev_loader, criterion_eval, eval_model_ref)
+        if is_averaging and config['optimizer_name'].startswith("NT-AvSGD"): eval_model_ref.to("cpu")
 
         pbar.set_description(f"Epoch {epoch}/{n_epochs} -> Dev PPL: {ppl_dev:.3f}")
 
-        # Trigger NT-AvSGD (solo se definito e non ancora attivo)
-        if trigger_setting is not None and not is_averaging:
+        # NT-AvSGD Trigger logic
+        if trigger_setting is not None and not is_averaging and config['optimizer_name'].startswith("NT-AvSGD"):
             if ppl_dev < best_ppl_for_avg_trigger:
                 best_ppl_for_avg_trigger = ppl_dev
                 avg_trigger_countdown = trigger_setting
@@ -130,27 +135,33 @@ def run_and_save_config(config):
                     avg_model = copy.deepcopy(model).to("cpu")
                     avg_step_count = 1
 
-        # Early Stopping & Miglior Modello
+        # Early Stopping & Best Model Logic
         if ppl_dev < best_dev_ppl:
             best_dev_ppl = ppl_dev
-            model_to_save = avg_model if is_averaging else model
+            model_to_save = avg_model if (config['optimizer_name'].startswith("NT-AvSGD") and is_averaging) else model
             best_model_state_dict = copy.deepcopy(model_to_save.state_dict())
-            patience = config['patience']
+            current_patience_epochs = config['patience'] # Reset patience
         else:
-            patience -= 1
-            if patience <= 0:
+            current_patience_epochs -= 1
+            if current_patience_epochs <= 0:
                 print(f"\n   Early stopping at epoch {epoch}.")
                 break
     pbar.close()
     print("--- Training Finished ---")
 
-    # --- Valutazione Finale & Salvataggio ---
+    # --- Final Evaluation & Saving ---
     final_test_ppl = math.inf
-    trigger_info = f"Yes (Epoch {trigger_epoch})" if trigger_epoch != -1 else "No"
     if best_model_state_dict is not None:
         print("\nEvaluating best model on Test Set...")
-        # Ricarica il modello corretto per la valutazione
-        eval_model = config['model_class'](**model_params).to(DEVICE)
+        # Re-initialize model for loading state_dict to ensure clean state
+        eval_model_params = {
+            'emb_size': config['emb'], 'hidden_size': config['hid'],
+            'output_size': vocab_len, 'pad_index': pad_token_id, 'n_layers': 1
+        }
+        if config['model_class'] == LM_LSTM_VarDropWT:
+            eval_model_params['dropoute'] = config['dropoute']
+            eval_model_params['dropouto'] = config['dropouto']
+        eval_model = config['model_class'](**eval_model_params).to(DEVICE)
         eval_model.load_state_dict(best_model_state_dict)
         eval_model.eval()
         with torch.no_grad():
@@ -160,13 +171,16 @@ def run_and_save_config(config):
         print(f"   Best Dev PPL: {best_dev_ppl:.4f}")
         print(f"   Final Test PPL: {final_test_ppl:.4f}")
         if config['optimizer_name'].startswith("NT-AvSGD"):
+            trigger_info = f"Yes (Epoch {trigger_epoch})" if trigger_epoch != -1 else "No"
             print(f"   Averaging Triggered: {trigger_info}")
 
+        # Saving the model
         print("\nSaving best model state dict...")
         os.makedirs(config['model_save_dir'], exist_ok=True)
         model_filename = f"{config['experiment_step']}_lr{config['lr']}_bs{config['batch_size']}"
-        if 'trigger' in config: model_filename += f"_t{config['trigger']}"
-        if 'patience' in config and config['patience'] != 3 : model_filename += f"_p{config['patience']}"
+        # Add trigger and patience to filename if they are relevant (not None or default)
+        if config.get('trigger') is not None: model_filename += f"_t{config['trigger']}"
+        if config.get('patience') !=3 and config.get('patience') is not None : model_filename += f"_p{config['patience']}" # Assuming default patience is 3
         model_filename += ".pt"
         model_save_path = os.path.join(config['model_save_dir'], model_filename)
         try:
@@ -176,92 +190,91 @@ def run_and_save_config(config):
             print(f"   Error saving model: {e}")
     else:
         print("\nNo best model state saved for this configuration.")
-
     print(f"--- Finished: {config['experiment_step']} ---")
 
-
-# ================== SCRIPT PRINCIPALE ==================
+# ==============================================================================
+# --- MAIN SCRIPT EXECUTION ---
+# ==============================================================================
 if __name__ == "__main__":
-    # --- Impostazioni Comuni ---
+    # Common Settings
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Device: {DEVICE}")
-    model_save_dir = "bin"
-    n_epochs = 100
-    clip = 5
-    hid = 300 # Dimensione nascosta comune
+    MODEL_SAVE_DIR = "bin" # Use a constant for the save directory
+    N_EPOCHS_DEFAULT = 100
+    CLIP_DEFAULT = 5
+    HID_DEFAULT = 300 # Common hidden size
 
-    # --- Caricamento Dati (una sola volta) ---
+    # Load Data (once)
     print("\nLoading data & vocabulary (once)...")
     try:
         train_raw = read_file("./dataset/PennTreeBank/ptb.train.txt")
         dev_raw = read_file("./dataset/PennTreeBank/ptb.valid.txt")
         test_raw = read_file("./dataset/PennTreeBank/ptb.test.txt")
-        lang = Lang(train_raw, ["<pad>", "<eos>"])
-        vocab_len = len(lang.word2id)
-        pad_token_id = lang.word2id["<pad>"]
+        lang_obj = Lang(train_raw, ["<pad>", "<eos>"]) # Renamed for clarity
+        vocab_len = len(lang_obj.word2id)
+        pad_token_id = lang_obj.word2id["<pad>"]
         print("Data loaded.")
     except FileNotFoundError as e:
-        print(f"Errore: Dataset non trovato: {e}")
+        print(f"Error: Dataset not found: {e}")
         exit()
 
     print("Creating Datasets (once)...")
-    train_dataset = PennTreeBank(train_raw, lang)
-    dev_dataset = PennTreeBank(dev_raw, lang)
-    test_dataset = PennTreeBank(test_raw, lang)
+    train_dataset = PennTreeBank(train_raw, lang_obj)
+    dev_dataset = PennTreeBank(dev_raw, lang_obj)
+    test_dataset = PennTreeBank(test_raw, lang_obj)
     print("Datasets created.")
 
-    # --- Definizioni delle Configurazioni da Eseguire ---
-    configurations = [
-        # --- B1 Best ---
+    # Store pre-loaded data to pass to the helper function
+    global_data_package = {
+        'train_dataset': train_dataset,
+        'dev_dataset': dev_dataset,
+        'test_dataset': test_dataset,
+        'vocab_len': vocab_len,
+        'pad_token_id': pad_token_id,
+        'lang_obj': lang_obj # Pass lang object if needed by any part (though not directly used by run_and_save_config)
+    }
+
+    # Configuration Definitions for Part B
+    configurations_to_run = [
+        # B1 Best: LSTM + Weight Tying + SGD
         {
             'experiment_step': "Part1B_Step1_Best",
             'model_class': LM_LSTM_WeightTying,
             'optimizer_name': "SGD",
-            'lr': 0.1,
-            'batch_size': 16,
-            'emb': 300, # Deve matchare hid per questo modello
-            'hid': 300,
-            'patience': 3, # Patience default
+            'lr': 0.1, 'batch_size': 16,
+            'emb': 300, 'hid': HID_DEFAULT, # emb must match hid for LM_LSTM_WeightTying
+            'patience': 3, # Default patience for this step
             'trigger': None, # No NT-AvSGD
-            'n_epochs': n_epochs, 'clip': clip, 'device': DEVICE, 'model_save_dir': model_save_dir
+            'n_epochs': N_EPOCHS_DEFAULT, 'clip': CLIP_DEFAULT, 'device': DEVICE, 'model_save_dir': MODEL_SAVE_DIR
         },
-        # --- B3 pre-FT Best ---
+        # B3 pre-FT Best: LSTM + WT + VarDrop + NT-AvSGD
         {
             'experiment_step': "Part1B_Step3_preFT_Best",
             'model_class': LM_LSTM_VarDropWT,
             'optimizer_name': "NT-AvSGD(SGD)",
-            'lr': 2.0,
-            'batch_size': 16,
-            'emb': 300, # Deve matchare hid per questo modello
-            'hid': 300,
-            'dropoute': 0.1,
-            'dropouto': 0.4,
-            'patience': 3, # Patience default
-            'trigger': 5,  # Trigger per B3 pre-FT
-            'n_epochs': n_epochs, 'clip': clip, 'device': DEVICE, 'model_save_dir': model_save_dir
+            'lr': 2.0, 'batch_size': 16,
+            'emb': 300, 'hid': HID_DEFAULT, # emb must match hid
+            'dropoute': 0.1, 'dropouto': 0.4,
+            'patience': 3, # Default patience for this step
+            'trigger': 5,
+            'n_epochs': N_EPOCHS_DEFAULT, 'clip': CLIP_DEFAULT, 'device': DEVICE, 'model_save_dir': MODEL_SAVE_DIR
         },
-        # --- B3 post-FT Best ---
+        # B3 post-FT Best: LSTM + WT + VarDrop + NT-AvSGD (Fine-Tuned)
         {
             'experiment_step': "Part1B_FineTuned_Best",
             'model_class': LM_LSTM_VarDropWT,
             'optimizer_name': "NT-AvSGD(SGD)",
-            'lr': 3.75,
-            'batch_size': 16,
-            'emb': 300, # Deve matchare hid per questo modello
-            'hid': 300,
-            'dropoute': 0.1,
-            'dropouto': 0.4,
-            'patience': 7, # Patience per FT
-            'trigger': 3,  # Trigger per FT
-            'n_epochs': n_epochs, 'clip': clip, 'device': DEVICE, 'model_save_dir': model_save_dir
+            'lr': 3.75, 'batch_size': 16,
+            'emb': 300, 'hid': HID_DEFAULT, # emb must match hid
+            'dropoute': 0.1, 'dropouto': 0.4,
+            'patience': 7, # Specific patience for FT
+            'trigger': 3,  # Specific trigger for FT
+            'n_epochs': N_EPOCHS_DEFAULT, 'clip': CLIP_DEFAULT, 'device': DEVICE, 'model_save_dir': MODEL_SAVE_DIR
         },
     ]
 
-    # --- Loop Principale sulle Configurazioni ---
-    for config in configurations:
-        # Passa le variabili globali necessarie (dati, vocab_len, pad_token_id) alla funzione
-        # Questo evita di doverle ridefinire dentro la funzione o passarle esplicitamente
-        # nel dizionario config, che sarebbe meno pulito.
-        run_and_save_config(config)
+    # --- Main Loop over Configurations ---
+    for current_config in configurations_to_run:
+        run_and_save_config(current_config, global_data_package)
 
     print("\n--- All Part B Configurations Finished ---")

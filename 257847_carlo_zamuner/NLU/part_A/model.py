@@ -1,117 +1,102 @@
-# --- START OF FILE model.py ---
 
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import numpy as np
 
-# Qui è dove definisci l'architettura del tuo modello usando PyTorch
-# MODELLO CON BIDIREZIONALITÀ E DROPOUT CONFIGURABILI
-
+# ==============================================================================
+# --- LSTM Model for Joint Intent Classification and Slot Filling ---
+# Supports configurable bidirectionality and dropout.
+# ==============================================================================
 
 class ModelIAS(nn.Module):
-    """Modello per Intent And Slot filling basato su LSTM con bidirezionalità e dropout configurabili."""
-
+    """
+    LSTM-based model for joint Intent Classification and Slot Filling.
+    """
     def __init__(
         self,
-        hid_size,
-        out_slot,
-        out_int,
-        emb_size,
-        vocab_len,
-        n_layer=1,
-        pad_index=0,
-        bidirectional=False,
-        dropout_rate=0.0,
+        hidden_size,      # LSTM hidden state size (per direction)
+        num_slot_classes,
+        num_intent_classes,
+        embedding_size,
+        vocab_size,
+        num_lstm_layers=1,
+        pad_token_idx=0,
+        is_bidirectional=False,
+        dropout_p=0.0,
     ):
-        """
-        Inizializza i layer del modello.
-        Args:
-            hid_size (int): Dimensione dello stato nascosto dell'LSTM (per *ogni* direzione).
-            out_slot (int): Numero di classi di slot.
-            out_int (int): Numero di classi di intent.
-            emb_size (int): Dimensione degli embedding.
-            vocab_len (int): Dimensione vocabolario.
-            n_layer (int): Numero di layer LSTM (default: 1).
-            pad_index (int): Indice padding (default: 0).
-            bidirectional (bool): Se True, usa LSTM bidirezionale (default: False).
-            dropout_rate (float): Tasso di dropout (default: 0.0).
-        """
         super(ModelIAS, self).__init__()
-        self.embedding = nn.Embedding(vocab_len, emb_size, padding_idx=pad_index)
 
-        # --- Configurazione LSTM ---
-        lstm_hid_size = hid_size
-        direction_multiplier = 2 if bidirectional else 1
-        linear_in_size = lstm_hid_size * direction_multiplier
+        self.embedding_layer = nn.Embedding(vocab_size, embedding_size, padding_idx=pad_token_idx)
 
-        # Layer LSTM con bidirezionalità configurabile
-        self.utt_encoder = nn.LSTM(
-            emb_size,
-            lstm_hid_size,
-            n_layer,
-            bidirectional=bidirectional,
+        direction_multiplier = 2 if is_bidirectional else 1
+        linear_input_size = hidden_size * direction_multiplier
+
+        self.lstm_encoder = nn.LSTM(
+            input_size=embedding_size,
+            hidden_size=hidden_size,
+            num_layers=num_lstm_layers,
+            bidirectional=is_bidirectional,
             batch_first=True,
         )
-        self.is_bidirectional = bidirectional
+        self.is_bidirectional_lstm = is_bidirectional
 
-        # Layer Lineari di Output - Adattano la dimensione di input
-        self.slot_out = nn.Linear(linear_in_size, out_slot)
-        self.intent_out = nn.Linear(linear_in_size, out_int)
+        self.slot_classifier = nn.Linear(linear_input_size, num_slot_classes)
+        self.intent_classifier = nn.Linear(linear_input_size, num_intent_classes)
 
-        # Layer Dropout (presente ma applicato solo se dropout_rate > 0)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.dropout_rate = dropout_rate
+        self.dropout_layer = nn.Dropout(dropout_p)
+        self.dropout_probability = dropout_p
 
-    def forward(self, utterance, seq_lengths):
+    def forward(self, input_utterances, sequence_lengths):
         """
-        Passaggio forward del modello.
+        Defines the forward pass of the model.
+        Args:
+            input_utterances (Tensor): Token IDs (batch_size, seq_len).
+            sequence_lengths (Tensor): Actual lengths of utterances in the batch.
+        Returns:
+            slot_logits (Tensor): (batch_size, num_slot_classes, seq_len).
+            intent_logits (Tensor): (batch_size, num_intent_classes).
         """
-        utt_emb = self.embedding(utterance)
+        embedded_utterances = self.embedding_layer(input_utterances)
 
-        # Applica dropout agli embedding (solo se dropout_rate > 0)
-        if self.dropout_rate > 0:
-            utt_emb = self.dropout(utt_emb)
+        if self.dropout_probability > 0:
+            embedded_utterances = self.dropout_layer(embedded_utterances)
 
-        # Packing
-        lengths_cpu = seq_lengths.cpu().clone().numpy()
-        if not np.all(lengths_cpu > 0):
-            lengths_cpu = np.maximum(lengths_cpu, 1)
-        packed_input = pack_padded_sequence(
-            utt_emb, lengths_cpu, batch_first=True, enforce_sorted=False
+        # Ensure lengths are positive for pack_padded_sequence
+        lengths_for_packing_cpu = sequence_lengths.cpu().clone().numpy()
+        if not np.all(lengths_for_packing_cpu > 0): # Defensive check for zero lengths
+            lengths_for_packing_cpu = np.maximum(lengths_for_packing_cpu, 1)
+        
+        packed_embeddings = pack_padded_sequence(
+            embedded_utterances,
+            lengths_for_packing_cpu,
+            batch_first=True,
+            enforce_sorted=False
         )
 
-        # Processamento RNN (LSTM)
-        packed_output, (hidden, cell) = self.utt_encoder(packed_input)
+        packed_output_lstm, (hidden_state_lstm, _) = self.lstm_encoder(packed_embeddings)
+        lstm_output_padded, _ = pad_packed_sequence(packed_output_lstm, batch_first=True)
 
-        # Unpacking
-        utt_encoded, _ = pad_packed_sequence(packed_output, batch_first=True)
+        if self.dropout_probability > 0:
+            lstm_output_padded = self.dropout_layer(lstm_output_padded)
 
-        # Applica dropout all'output dell'LSTM (solo se dropout_rate > 0)
-        if self.dropout_rate > 0:
-            utt_encoded = self.dropout(utt_encoded)
-
-        # Estrazione ultimo stato nascosto per intento
-        # hidden è (n_layer * num_directions, batch, hid_size)
-        if self.is_bidirectional:
-            # Concatena ultimo stato forward e backward dell'ultimo layer
-            last_hidden = torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1)
+        # Prepare LSTM output for Intent Classification
+        if self.is_bidirectional_lstm:
+            # Concatenate last hidden states of forward and backward LSTM
+            last_hidden_for_intent = torch.cat(
+                (hidden_state_lstm[-2, :, :], hidden_state_lstm[-1, :, :]), dim=1
+            )
         else:
-            # Prendi ultimo stato dell'ultimo layer
-            last_hidden = hidden[-1, :, :]
+            last_hidden_for_intent = hidden_state_lstm[-1, :, :]
 
-        # Applica dropout all'ultimo stato nascosto (solo se dropout_rate > 0)
-        if self.dropout_rate > 0:
-            last_hidden = self.dropout(last_hidden)
+        if self.dropout_probability > 0:
+            last_hidden_for_intent = self.dropout_layer(last_hidden_for_intent)
 
-        # Calcolo Logits
-        slots = self.slot_out(utt_encoded)
-        intent = self.intent_out(last_hidden)
+        # Generate Logits
+        slot_logits = self.slot_classifier(lstm_output_padded)
+        intent_logits = self.intent_classifier(last_hidden_for_intent)
 
-        # Permutazione Dimensioni Slot per Loss
-        slots = slots.permute(0, 2, 1)
+        # Permute Slot Logits for CrossEntropyLoss: (N, C, seq_len)
+        slot_logits = slot_logits.permute(0, 2, 1)
 
-        return slots, intent
-
-
-# --- END OF FILE model.py ---
+        return slot_logits, intent_logits

@@ -1,15 +1,6 @@
-# --- START OF FILE main.py ---
-
-# Questo file è usato per eseguire le tue funzioni e stampare i risultati
-# Implementazione per la Parte 2.B: Fine-tuning BERT-base per Joint Intent & Slot
-# Esegue un singolo run con la MIGLIORE configurazione trovata dalla Grid Search
 
 import os
-import csv
-from pprint import pprint
-import matplotlib.pyplot as plt
-from tqdm import tqdm # Importato per la barra di progresso
-
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,38 +8,27 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
 from collections import Counter
+from tabulate import tabulate
 
-from tabulate import tabulate # Importato per la tabella finale
-
-# Non necessari per un singolo run BERT
-# import pandas as pd
-# import seaborn as sns
-
-# Importa tutto da utils.py (data loading, Lang, IntentsAndSlotsBERT, collate_fn_bert, device, IGNORE_INDEX)
-from utils import *
-
-# Importa il nuovo modello BERT
+from utils import * # load_data, train_test_split, Lang, IntentsAndSlotsBERT, collate_fn_bert, device, IGNORE_INDEX
 from model import JointBERTModel
-
-# Importa lo script di valutazione conll
 try:
-    from conll import evaluate
+    from conll import evaluate as conll_evaluate
 except ImportError:
-    print("Errore: assicurati che il file 'conll.py' sia presente nella directory.")
+    print("CRITICAL ERROR: 'conll.py' not found.")
     exit()
 
-# Importa il tokenizer di BERT Fast
 from transformers import BertTokenizerFast
 
+# ==============================================================================
+# --- Training and Evaluation Loops for BERT ---
+# ==============================================================================
 
-# --- Funzioni di Training e Valutazione ADATTATE per BERT (invariate) ---
-# train_loop e eval_loop rimangono le stesse
-
-def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=1.0):
-    """Esegue un'epoca di addestramento per il modello BERT."""
+def train_loop_bert(data_loader, optimizer, criterion_slots, criterion_intents, model, grad_clip=1.0):
+    """Executes one training epoch for the BERT model."""
     model.train()
-    total_loss = 0.0
-    for batch in tqdm(data, desc="Training Batches", leave=False):
+    total_epoch_loss = 0.0
+    for batch in tqdm(data_loader, desc="Training", leave=False, unit="batch"):
         optimizer.zero_grad()
         intent_logits, slot_logits = model(
             input_ids=batch["input_ids"],
@@ -56,448 +36,152 @@ def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=
             token_type_ids=batch["token_type_ids"],
         )
         loss_intent = criterion_intents(intent_logits, batch["intent_labels"])
-        loss_slot = criterion_slots(slot_logits.permute(0, 2, 1), batch["slot_labels"])
-        loss = loss_intent + loss_slot
-        total_loss += loss.item()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        loss_slot = criterion_slots(slot_logits.permute(0, 2, 1), batch["slot_labels"]) # Align for CrossEntropy
+        current_loss = loss_intent + loss_slot
+        total_epoch_loss += current_loss.item()
+        current_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
-    return total_loss / len(data) if len(data) > 0 else float("inf")
+    return total_epoch_loss / len(data_loader) if data_loader else float("inf")
 
-
-def eval_loop(data, criterion_slots, criterion_intents, model, lang, tokenizer):
-    """Esegue la valutazione per il modello BERT, gestendo allineamento slot."""
+def eval_loop_bert(data_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer_obj):
+    """Performs evaluation for the BERT model, handling slot alignment."""
     model.eval()
-    total_loss = 0.0
-
-    ref_intents, hyp_intents = [], []
-    ref_slots_list, hyp_slots_list = [], []
-    ignore_index = IGNORE_INDEX
+    total_epoch_loss = 0.0
+    all_ref_intents, all_hyp_intents = [], []
+    all_ref_slot_sequences, all_hyp_slot_sequences = [], []
 
     with torch.no_grad():
-        for batch in tqdm(data, desc="Evaluation Batches", leave=False):
+        for batch in tqdm(data_loader, desc="Evaluating", leave=False, unit="batch"):
             intent_logits, slot_logits = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 token_type_ids=batch["token_type_ids"],
             )
             loss_intent = criterion_intents(intent_logits, batch["intent_labels"])
-            loss_slot = criterion_slots(
-                slot_logits.permute(0, 2, 1), batch["slot_labels"]
-            )
-            loss = loss_intent + loss_slot
-            total_loss += loss.item()
-            # Intent Inference
-            out_intent_ids = torch.argmax(intent_logits, dim=1).cpu().tolist()
-            hyp_intents.extend(
-                [lang.id2intent.get(idx, "UNK_INTENT") for idx in out_intent_ids]
-            )
-            ref_intents.extend(
-                [
-                    lang.id2intent.get(idx, "UNK_INTENT")
-                    for idx in batch["intent_labels"].cpu().tolist()
-                ]
-            )
+            loss_slot = criterion_slots(slot_logits.permute(0, 2, 1), batch["slot_labels"])
+            total_epoch_loss += (loss_intent + loss_slot).item()
 
-            # Slot Inference e Allineamento Sub-token per CoNLL
-            predicted_slot_ids = torch.argmax(slot_logits, dim=-1).cpu().tolist()
+            pred_intent_ids = torch.argmax(intent_logits, dim=1).cpu().tolist()
+            all_hyp_intents.extend([lang_obj.id2intent.get(idx, "UNK_INTENT") for idx in pred_intent_ids])
+            all_ref_intents.extend([lang_obj.id2intent.get(idx, "UNK_INTENT") for idx in batch["intent_labels"].cpu().tolist()])
+
+            pred_slot_ids_batch = torch.argmax(slot_logits, dim=-1).cpu().tolist()
             for i in range(batch["input_ids"].size(0)):
-                word_id_sequence = batch["word_ids"][i]
-                attention_mask_sequence = batch["attention_mask"][i].cpu().tolist()
-                original_slot_labels_list = batch["original_slot_labels"][i]
-                original_words_list = batch["original_words"][i]
-                predicted_slot_id_sequence = predicted_slot_ids[i]
-                current_pred_slots_labels_aligned = []
-                last_word_id = None
-                for token_idx, word_id in enumerate(word_id_sequence):
-                    if word_id is not None and attention_mask_sequence[token_idx] == 1:
-                        is_first_subtoken = (
-                            token_idx == 0 or word_id_sequence[token_idx - 1] != word_id
-                        )
-                        if is_first_subtoken:
-                            if word_id < len(original_slot_labels_list):
-                                predicted_id = predicted_slot_id_sequence[token_idx]
-                                predicted_slot_label = lang.id2slot.get(
-                                    predicted_id, "UNK_SLOT_PRED"
-                                )
-                                current_pred_slots_labels_aligned.append(
-                                    predicted_slot_label
-                                )
-                            else:
-                                pass
-                if len(original_words_list) == len(original_slot_labels_list) and len(
-                    original_words_list
-                ) == len(current_pred_slots_labels_aligned):
-                    ref_slots_list.append(
-                        list(zip(original_words_list, original_slot_labels_list))
-                    )
-                    hyp_slots_list.append(
-                        list(
-                            zip(original_words_list, current_pred_slots_labels_aligned)
-                        )
-                    )
-                else:
-                    tqdm.write(
-                        f"\nWarning: Mismatch in lengths for conll eval in batch {i}."
-                    )
-                    tqdm.write(
-                        f"  Original words: {len(original_words_list)}, Ref labels: {len(original_slot_labels_list)}, Pred labels (aligned): {len(current_pred_slots_labels_aligned)}"
-                    )
-                    min_len = min(
-                        len(original_words_list),
-                        len(original_slot_labels_list),
-                        len(current_pred_slots_labels_aligned),
-                    )
-                    ref_slots_list.append(
-                        list(
-                            zip(
-                                original_words_list[:min_len],
-                                original_slot_labels_list[:min_len],
-                            )
-                        )
-                    )
-                    hyp_slots_list.append(
-                        list(
-                            zip(
-                                original_words_list[:min_len],
-                                current_pred_slots_labels_aligned[:min_len],
-                            )
-                        )
-                    )
+                word_ids_sample = batch["word_ids"][i]
+                attn_mask_sample = batch["attention_mask"][i].cpu().tolist()
+                original_slots_sample = batch["original_slot_labels"][i]
+                original_words_sample = batch["original_words"][i]
+                pred_slot_ids_sample = pred_slot_ids_batch[i]
+                aligned_pred_slots = []
+                last_word_idx = -1
+                for token_idx, word_idx in enumerate(word_ids_sample):
+                    if word_idx is not None and attn_mask_sample[token_idx] == 1:
+                        if word_idx != last_word_idx: # First sub-token of a new word
+                            if word_idx < len(original_words_sample):
+                                aligned_pred_slots.append(lang_obj.id2slot.get(pred_slot_ids_sample[token_idx], "O"))
+                        last_word_idx = word_idx
+                
+                min_len = min(len(original_words_sample), len(original_slots_sample), len(aligned_pred_slots))
+                if min_len > 0: # Ensure alignment is possible
+                    all_ref_slot_sequences.append(list(zip(original_words_sample[:min_len], original_slots_sample[:min_len])))
+                    all_hyp_slot_sequences.append(list(zip(original_words_sample[:min_len], aligned_pred_slots[:min_len])))
+    slot_f1 = 0.0
+    if all_ref_slot_sequences and all_hyp_slot_sequences:
+        try:
+            slot_f1 = conll_evaluate(all_ref_slot_sequences, all_hyp_slot_sequences).get("total", {}).get("f", 0.0)
+        except Exception: pass # Minimal error handling for CoNLL
+    intent_acc = classification_report(all_ref_intents, all_hyp_intents, zero_division=0, output_dict=True).get("accuracy", 0.0)
+    mean_epoch_loss = total_epoch_loss / len(data_loader) if data_loader else float("inf")
+    return slot_f1, intent_acc, mean_epoch_loss
 
-    # --- Calcolo Metriche ---
-    try:
-        results = evaluate(ref_slots_list, hyp_slots_list)
-        slot_f1 = results.get("total", {}).get("f", 0.0)
-    except Exception as ex:
-        tqdm.write(f"\nAttenzione: Errore durante la valutazione conll: {ex}")
-        slot_f1 = 0.0
-    report_intent = classification_report(
-        ref_intents, hyp_intents, zero_division=0, output_dict=True
-    )
-    intent_acc = report_intent.get("accuracy", 0.0)
-    mean_loss = total_loss / len(data) if len(data) > 0 else float("inf")
-    return slot_f1, intent_acc, mean_loss
+# ==============================================================================
+# --- Main Execution Block ---
+# ==============================================================================
 
-
-# --- Funzioni per la gestione dei risultati e delle cartelle (simili a prima) ---
-def create_run_output_dir(base_results_dir, step_name, run_params_str):
-    """Crea la struttura di directory per salvare i risultati di una run."""
-    run_dir = os.path.join(base_results_dir, step_name, run_params_str)
-    os.makedirs(run_dir, exist_ok=True)
-    tqdm.write(f"Risultati per questa run verranno salvati in: {run_dir}")
-    return run_dir
-
-
-def save_epoch_history(run_output_dir, history_data):
-    csv_filepath = os.path.join(run_output_dir, "epoch_history.csv")
-    if not history_data:
-        return
-    fieldnames = history_data[0].keys()
-    with open(csv_filepath, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(history_data)
-
-
-def save_test_results(run_output_dir, test_f1, test_acc, test_loss):
-    csv_filepath = os.path.join(run_output_dir, "test_results.csv")
-    fieldnames = ["Test_Slot_F1", "Test_Intent_Acc", "Test_Loss"]
-    with open(csv_filepath, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(
-            {
-                "Test_Slot_F1": test_f1,
-                "Test_Intent_Acc": test_acc,
-                "Test_Loss": test_loss,
-            }
-        )
-
-
-# --- Blocco Principale di Esecuzione ---
 if __name__ == "__main__":
-    # --- 1. Caricamento e Preparazione Dati ---
-    print("Caricamento dati ATIS...")
-    data_dir = os.path.join("dataset", "ATIS")
-    train_raw_all = load_data(os.path.join(data_dir, "train.json"))
+    
+    # --- 1. Data Loading and Preprocessing ---
+    data_dir = os.environ.get("ATIS_DATA_DIR", os.path.join("dataset", "ATIS"))
+    if not os.path.exists(os.path.join(data_dir, "train.json")):
+        print(f"CRITICAL ERROR: Dataset not found at {data_dir}.")
+        exit()
+    train_raw_full = load_data(os.path.join(data_dir, "train.json"))
     test_raw = load_data(os.path.join(data_dir, "test.json"))
-    print(f"Campioni Train caricati (prima dello split): {len(train_raw_all)}")
-    print(f"Campioni Test caricati: {len(test_raw)}")
 
-    print("Creazione Dev set...")
-    portion = 0.10
-    intents_list_all = [x["intent"] for x in train_raw_all]
-    inputs_split, labels_split, mini_train_split = [], [], []
-    count_y_split = Counter(intents_list_all)
-    for i, intent in enumerate(intents_list_all):
-        if count_y_split[intent] > 1:
-            inputs_split.append(train_raw_all[i])
-            labels_split.append(intent)
-        else:
-            mini_train_split.append(train_raw_all[i])
-    X_train_split, X_dev_split, _, _ = train_test_split(
-        inputs_split,
-        labels_split,
-        test_size=portion,
-        random_state=42,
-        shuffle=True,
-        stratify=labels_split,
-    )
-    train_raw = X_train_split
-    train_raw.extend(mini_train_split)
-    dev_raw = X_dev_split
-    print(
-        f"Dimensioni finali (dopo split): Train={len(train_raw)}, Dev={len(dev_raw)}, Test={len(test_raw)}"
-    )
+    dev_portion = 0.10
+    intents_list_full = [x["intent"] for x in train_raw_full]
+    unique_intent_counts = Counter(intents_list_full)
+    stratify_inputs, stratify_labels, single_instance_samples = [], [], []
+    for i, intent_item in enumerate(intents_list_full):
+        if unique_intent_counts[intent_item] > 1:
+            stratify_inputs.append(train_raw_full[i]); stratify_labels.append(intent_item)
+        else: single_instance_samples.append(train_raw_full[i])
+    if len(stratify_inputs) > 1 and len(set(stratify_labels)) > 1:
+        train_stratified, dev_stratified, _, _ = train_test_split(stratify_inputs, stratify_labels, test_size=dev_portion, random_state=42, shuffle=True, stratify=stratify_labels)
+        train_raw = train_stratified + single_instance_samples; dev_raw = dev_stratified
+    else:
+        num_dev_samples = int(len(train_raw_full) * dev_portion)
+        if num_dev_samples > 0 and len(train_raw_full) - num_dev_samples > 0: train_raw, dev_raw = train_test_split(train_raw_full, test_size=dev_portion, random_state=42, shuffle=True)
+        else: train_raw = train_raw_full; dev_raw = []
 
-    corpus_all = train_raw + dev_raw + test_raw
-    all_slots_corpus = set(sum([line["slots"].split() for line in corpus_all], []))
-    all_intents_corpus = set([line["intent"] for line in corpus_all])
-    lang = Lang(all_intents_corpus, all_slots_corpus)
-    print(f"Slot: {len(lang.slot2id)} etichette")
-    print(f"Intenti: {len(lang.intent2id)} etichette")
+    corpus_for_labels = train_raw + (dev_raw if dev_raw else []) + test_raw
+    all_slot_labels = set(sum([s["slots"].split() for s in corpus_for_labels], []))
+    all_intent_labels = set([s["intent"] for s in corpus_for_labels])
+    lang_obj = Lang(all_intent_labels, all_slot_labels) # Lang for BERT: only labels
 
+    # --- 2. BERT Fine-tuning Parameters (Best Configuration) ---
+    BERT_MODEL_NAME = 'bert-base-uncased'; LEARNING_RATE = 5e-5; DROPOUT_RATE = 0.3
+    BATCH_SIZE_TRAIN = 128; BATCH_SIZE_EVAL = 128; MAX_EPOCHS = 50
+    EARLY_STOP_PATIENCE = 10; GRAD_CLIP = 1.0; MAX_SEQ_LENGTH = 50
+    config_run_name = f"BestBERT_{BERT_MODEL_NAME.split('/')[-1]}_DR{DROPOUT_RATE}_LR{LEARNING_RATE}_BS{BATCH_SIZE_TRAIN}"
+    print(f"\n--- Running: {config_run_name} ---")
 
-    # ===========================================================
-    # --- SEZIONE PARAMETRI DI FINE-TUNING MODIFICABILI ---
-    # --- Configurazione per BERT-base (Singolo Run) ---
-    # --- Utilizza la migliore configurazione dalla Grid Search ---
-    # ===========================================================
+    # --- 3. Tokenizer, Datasets, DataLoaders ---
+    tokenizer = BertTokenizerFast.from_pretrained(BERT_MODEL_NAME)
+    train_dataset = IntentsAndSlotsBERT(train_raw, lang_obj, tokenizer, max_len=MAX_SEQ_LENGTH)
+    dev_dataset = IntentsAndSlotsBERT(dev_raw, lang_obj, tokenizer, max_len=MAX_SEQ_LENGTH) if dev_raw else None
+    test_dataset = IntentsAndSlotsBERT(test_raw, lang_obj, tokenizer, max_len=MAX_SEQ_LENGTH)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE_TRAIN, collate_fn=collate_fn_bert, shuffle=True)
+    dev_loader = DataLoader(dev_dataset, batch_size=BATCH_SIZE_EVAL, collate_fn=collate_fn_bert) if dev_dataset else None
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE_EVAL, collate_fn=collate_fn_bert)
 
-    # --- Parametri Generali ---
-    n_epochs = 50           # Numero massimo di epoche per early stopping
-    patience = 10           # Pazienza per l'early stopping (basato su Dev F1)
-    clip = 1.0              # Valore per gradient clipping (tipico 1.0 per BERT)
-    max_seq_length = 50     # Lunghezza massima sequenza tokenizzata BERT (come nel paper)
-
-    # --- Parametri Specifici del Modello (BERT-base) e Ottimizzatore ---
-    bert_model_name = 'bert-base-uncased' # <-- Modello BERT-base
-
-    # Parametri della MIGLIORE configurazione trovata nella Grid Search per BERT-base
-    # Basato sulla tua Grid Search, la configurazione DR=0.3, LR=5e-05, BS=128 ha dato Acc max e Loss min
-    lr_fixed = 5e-5         # Learning Rate
-    bert_dropout_rate_fixed = 0.3 # Tasso di Dropout
-    batch_size_train_fixed = 128 # Batch size per il training
-    batch_size_eval_fixed = 128 # Batch size per valutazione
-
-    # --- Parametri per Nomi Cartelle e File ---
-    base_results_directory = "results"
-    # Nome specifico per il run di BERT-base con la migliore configurazione
-    step_directory_name = "step_bert_base_finetuning_best_run"
-
-    # ===========================================================
-    # --- FINE SEZIONE PARAMETRI MODIFICABILI ---
-    # ===========================================================
-
-    # --- 2. Inizializzazione Tokenizer BERT ---
-    print("\nInizializzazione BertTokenizer...")
-    # Il tokenizer deve corrispondere al modello base
-    tokenizer = BertTokenizerFast.from_pretrained(bert_model_name) # <-- Inizializza tokenizer con nome modello BASE
-    print(f"BertTokenizer type: {type(tokenizer)}")
-    print(f"BertTokenizer vocab size: {len(tokenizer)}")
-    print(f"BertTokenizer [PAD] token ID: {tokenizer.pad_token_id}")
-
-
-    # --- 3. Creazione Dataset e DataLoader (ADATTATI per BERT) ---
-    # Usa i parametri definiti sopra
-    print("Creazione Dataset e DataLoader (BERT compatible)...")
-
-    train_dataset = IntentsAndSlotsBERT(train_raw, lang, tokenizer, max_len=max_seq_length)
-    dev_dataset = IntentsAndSlotsBERT(dev_raw, lang, tokenizer, max_len=max_seq_length)
-    test_dataset = IntentsAndSlotsBERT(test_raw, lang, tokenizer, max_len=max_seq_length)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_train_fixed, collate_fn=collate_fn_bert, shuffle=True)
-    dev_loader = DataLoader(dev_dataset, batch_size=batch_size_eval_fixed, collate_fn=collate_fn_bert)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_eval_fixed, collate_fn=collate_fn_bert)
-
-    print("DataLoader BERT-compatible pronti.")
-    print(f"Lunghezza massima sequenza: {max_seq_length}")
-    print(f"Batch size (Train/Eval): {batch_size_train_fixed}/{batch_size_eval_fixed}")
-
-
-    # --- 4. Definizione Modello, Ottimizzatore, Loss (ADATTATI per BERT) ---
-    # Usa i parametri definiti sopra
-    print("\nInizializzazione Modello BERT...")
-
-    num_intent_labels = len(lang.intent2id)
-    num_slot_labels = len(lang.slot2id)
-
-    model = JointBERTModel(num_intent_labels, num_slot_labels, bert_model_name=bert_model_name, dropout_rate=bert_dropout_rate_fixed)
-    model.to(device)
-
-    optimizer = optim.Adam(model.parameters(), lr=lr_fixed)
-
+    # --- 4. Model, Optimizer, Criterion ---
+    model = JointBERTModel(len(lang_obj.intent2id), len(lang_obj.slot2id), BERT_MODEL_NAME, DROPOUT_RATE).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion_intents = nn.CrossEntropyLoss()
     criterion_slots = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
+    # --- 5. Training Loop ---
+    best_dev_f1 = 0.0; patience_counter = EARLY_STOP_PATIENCE
+    best_model_state_for_test = model.state_dict().copy()
 
-    print("Modello BERT inizializzato.")
-    print(f"Modello BERT Name: {bert_model_name}")
-    print(f"Hyperparameters: LR={lr_fixed}, Dropout={bert_dropout_rate_fixed}, BatchSize={batch_size_train_fixed}, MaxLen={max_seq_length}, Patience={patience}, Clip={clip}")
-
-
-    # --- Crea la cartella di output per questo run ---
-    params_string = f"model_{bert_model_name.split('/')[-1]}_lr{str(lr_fixed).replace('.', '')}_dr{str(bert_dropout_rate_fixed).replace('.', '')}_bs{batch_size_train_fixed}_maxlen{max_seq_length}"
-    run_output_directory = create_run_output_dir(base_results_directory, step_directory_name, params_string)
-
-
-    # --- 6. Addestramento e Valutazione (BERT) ---
-    print(f"\n--- Inizio Fine-tuning {bert_model_name} ---")
-
-    epoch_history_data = []
-
-    best_f1_dev, current_patience_count, best_epoch_num = 0.0, patience, 0
-    best_model_state_dict = None
-
-
-    tqdm.write(f"Inizio fine-tuning per max {n_epochs} epoche...")
-    epoch_iterator = tqdm(range(1, n_epochs + 1), desc=f"{bert_model_name} Fine-tuning", leave=True)
-
-    try:
-        for epoch in epoch_iterator:
-            loss_train_epoch = train_loop(train_loader, optimizer, criterion_slots, criterion_intents, model, clip)
-
-            f1_dev_epoch, acc_dev_epoch, loss_dev_epoch = eval_loop(dev_loader, criterion_slots, criterion_intents, model, lang, tokenizer)
-
-            epoch_iterator.set_postfix(
-                {
-                    "TrainLoss": f"{loss_train_epoch:.4f}",
-                    "DevLoss": f"{loss_dev_epoch:.4f}",
-                    "DevF1": f"{f1_dev_epoch:.4f}",
-                    "DevAcc": f"{acc_dev_epoch:.4f}",
-                }
-            )
-
-            epoch_history_data.append(
-                {
-                    "Epoch": epoch,
-                    "Train_Loss": loss_train_epoch,
-                    "Dev_Loss": loss_dev_epoch,
-                    "Dev_Slot_F1": f1_dev_epoch,
-                    "Dev_Intent_Acc": acc_dev_epoch,
-                }
-            )
-
-            # Early Stopping Logic (basata su Dev F1)
-            if f1_dev_epoch > best_f1_dev:
-                best_f1_dev = f1_dev_epoch
-                best_epoch_num = epoch
-                current_patience_count = patience
-                tqdm.write(
-                    f"\n*** Epoca {epoch}: Nuovo miglior F1 Dev = {best_f1_dev:.4f}. Salvato stato modello. ***"
-                )
-                best_model_state_dict = model.state_dict().copy()
-                torch.save(best_model_state_dict, os.path.join(run_output_directory, "best_model.pth"))
+    if not dev_loader:
+        tqdm.write(f"Training for {MAX_EPOCHS} epochs (no dev set)...")
+        for epoch in tqdm(range(1, MAX_EPOCHS + 1), desc=f"Training", unit="epoch"):
+            train_loop_bert(train_loader, optimizer, criterion_slots, criterion_intents, model, GRAD_CLIP)
+        best_model_state_for_test = model.state_dict().copy()
+    else:
+        epoch_pbar = tqdm(range(1, MAX_EPOCHS + 1), desc=f"Fine-tuning {BERT_MODEL_NAME.split('/')[-1]}", unit="epoch")
+        for epoch in epoch_pbar:
+            train_loss = train_loop_bert(train_loader, optimizer, criterion_slots, criterion_intents, model, GRAD_CLIP)
+            dev_f1, dev_acc, dev_loss = eval_loop_bert(dev_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer)
+            epoch_pbar.set_postfix({"TrainLoss": f"{train_loss:.4f}", "DevLoss": f"{dev_loss:.4f}", "DevF1": f"{dev_f1:.4f}", "DevAcc": f"{dev_acc:.4f}"})
+            if dev_f1 > best_dev_f1:
+                best_dev_f1 = dev_f1; patience_counter = EARLY_STOP_PATIENCE; best_model_state_for_test = model.state_dict().copy()
             else:
-                current_patience_count -= 1
-                if current_patience_count > 0 and current_patience_count < patience:
-                     if (patience - current_patience_count) % max(1, patience // 3) == 0 or current_patience_count == 1:
-                         tqdm.write(
-                            f"Epoca {epoch}: Nessun miglioramento F1 Dev. Pazienza rimasta: {current_patience_count}"
-                        )
-
-            if current_patience_count <= 0:
-                tqdm.write(f"--- Early stopping attivato all'epoca {epoch}. ---")
-                break
-
-    except Exception as e:
-        tqdm.write(f"\nERRORE CRITICO durante fine-tuning BERT: {e}")
-        try:
-             if model:
-                  torch.save(model.state_dict(), os.path.join(run_output_directory, "last_state_on_error.pth"))
-        except Exception as save_e:
-             tqdm.write(f"Errore durante salvataggio stato in caso di errore: {save_e}")
-        f1_test, acc_test, loss_test = 0.0, 0.0, float('inf')
-        best_model_state_dict = None
-
-    finally:
-         epoch_iterator.close()
-
-    if best_model_state_dict is None and epoch_history_data:
-         tqdm.write("Attenzione: Nessun miglioramento F1 Dev trovato. Valuto con l'ultimo stato completato.")
-         best_model_state_dict = model.state_dict().copy()
-         torch.save(best_model_state_dict, os.path.join(run_output_directory, "last_state_valid.pth"))
-    elif best_model_state_dict is None and not epoch_history_data:
-         tqdm.write("Attenzione: Addestramento fallito o interrotto subito. Impossibile eseguire valutazione finale.")
-
-
-    # --- 7. Valutazione Finale sul Test set ---
-    if best_model_state_dict:
-        print(f"\nValutazione finale sul Test set...")
-        try:
-            # Ricarica il modello pulito con gli stessi parametri usati per il training
-            model_final_eval = JointBERTModel(num_intent_labels, num_slot_labels, bert_model_name=bert_model_name, dropout_rate=bert_dropout_rate_fixed)
-            model_final_eval.load_state_dict(best_model_state_dict)
-            model_final_eval.to(device)
-            f1_test, acc_test, loss_test = eval_loop(test_loader, criterion_slots, criterion_intents, model_final_eval, lang, tokenizer)
-            del model_final_eval
-
-        except Exception as e:
-            print(f"\nERRORE durante la valutazione finale sul Test set: {e}")
-            f1_test, acc_test, loss_test = 0.0, 0.0, float('inf')
-
-
+                patience_counter -= 1
+            if patience_counter <= 0: tqdm.write(f"\nEarly stopping at epoch {epoch}."); break
+        epoch_pbar.close()
+    
+    # --- 6. Final Evaluation on Test Set ---
+    if best_model_state_for_test:
+        model.load_state_dict(best_model_state_for_test)
+        test_f1, test_acc, test_loss = eval_loop_bert(test_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer)
+        print("\n--- FINAL TEST RESULTS (BERT Best Config) ---")
+        results_data = [["Metric", "Value"], ["Configuration", config_run_name], ["Test Slot F1", f"{test_f1:.4f}"], ["Test Intent Acc", f"{test_acc:.4f}"], ["Test Loss", f"{test_loss:.4f}"]]
+        print(tabulate(results_data, headers="firstrow", tablefmt="grid"))
     else:
-         print("\nSkipping final test set evaluation due to failed training or no improvement.")
-         f1_test, acc_test, loss_test = 0.0, 0.0, float('inf')
+        print("CRITICAL ERROR: No model state for final BERT testing.")
 
-
-    print("\n--- Risultati Finali sul Test Set ---")
-    config_name_final = f"BERT_{bert_model_name.split('/')[-1]}_DR{bert_dropout_rate_fixed}_LR{lr_fixed}_BS{batch_size_train_fixed}_MaxLen{max_seq_length}"
-    print(f"Configurazione: {config_name_final}")
-    test_results_data = [
-        ["Slot Filling F1", f1_test],
-        ["Intent Classification Accuracy", acc_test],
-        ["Loss Media Test", loss_test]
-    ]
-    print(tabulate(test_results_data, headers=["Metrica", "Valore"], tablefmt="grid"))
-
-    # --- 8. Salvataggio Risultati e Plot ---
-    print("\nSalvataggio storia, risultati finali e grafici...")
-
-    if best_model_state_dict or epoch_history_data:
-         save_epoch_history(run_output_directory, epoch_history_data)
-         save_test_results(run_output_directory, f1_test, acc_test, loss_test)
-    else:
-         print("Nessun dato valido da salvare.")
-
-    if epoch_history_data:
-        plt.figure(figsize=(10, 6))
-        epochs_plot = [d["Epoch"] for d in epoch_history_data]
-        train_losses_plot = [d["Train_Loss"] for d in epoch_history_data]
-        dev_losses_plot = [d["Dev_Loss"] for d in epoch["Dev_Loss"] for d in epoch_history_data]
-        plt.plot(epochs_plot, train_losses_plot, label="Train Loss")
-        plt.plot(epochs_plot, dev_losses_plot, label="Dev Loss")
-        plt.title(f"Andamento Loss - {config_name_final}")
-        plt.xlabel("Epoche")
-        plt.ylabel("Loss Media (Cross Entropy)")
-        if best_epoch_num > 0:
-            plt.axvline(x=best_epoch_num,color="r",linestyle="--",label=f"Best Dev F1 Epoch ({best_epoch_num})")
-        plt.legend(); plt.grid(True)
-        loss_plot_filepath = os.path.join(run_output_directory, f"loss_plot.png")
-        plt.savefig(loss_plot_filepath); plt.close()
-        print(f"Grafico loss salvato in: {loss_plot_filepath}")
-
-        plt.figure(figsize=(10, 6))
-        dev_f1s_plot = [d["Dev_Slot_F1"] for d in epoch_history_data]
-        dev_accs_plot = [d["Dev_Intent_Acc"] for d in epoch_history_data]
-        plt.plot(epochs_plot, dev_f1s_plot, label="Dev Slot F1")
-        plt.plot(epochs_plot, dev_accs_plot, label="Dev Intent Accuracy")
-        plt.title(f"Andamento Metriche Dev - {config_name_final}")
-        plt.xlabel("Epoche"); plt.ylabel("Score")
-        if best_epoch_num > 0:
-            plt.axvline(x=best_epoch_num,color="r",linestyle="--",label=f"Best Dev F1 Epoch ({best_epoch_num})")
-        plt.legend(); plt.grid(True)
-        metrics_plot_filepath = os.path.join(run_output_directory, f"metrics_plot.png")
-        plt.savefig(metrics_plot_filepath); plt.close()
-        print(f"Grafico metriche salvato in: {metrics_plot_filepath}")
-    else:
-        print("Nessun dato storico per generare i grafici.")
-
-    # Pulizia finale della memoria del modello istanziato per la valutazione finale
-    # (del model_final_eval è già stato fatto)
-
-    print("\nEsecuzione Parte 2.B completata.")
-
-# --- END OF FILE main.py ---
+    print(f"\nRun finished: {config_run_name}")

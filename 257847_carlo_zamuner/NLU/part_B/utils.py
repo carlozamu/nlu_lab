@@ -1,264 +1,135 @@
-# --- START OF FILE utils.py ---
 
 import json
 import os
-import random
 from collections import Counter
-from pprint import pprint
-
-import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn as nn # For type hinting if init_weights_linear is kept
 import torch.utils.data as data
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split # Imported for use by main.py
+from transformers import BertTokenizerFast
 
-# Importiamo il tokenizer di BERT (ora anche la versione Fast esplicitamente)
-from transformers import (
-    BertTokenizer,
-    BertTokenizerFast,
-)  # <-- Importato anche BertTokenizerFast
+# ==============================================================================
+# --- Global Variables and Device Configuration ---
+# ==============================================================================
 
+if torch.backends.mps.is_available(): device = torch.device("mps")
+elif torch.cuda.is_available(): device = torch.device("cuda:0")
+else: device = torch.device("cpu")
 
-# --- Variabili Globali ---
+if device.type == "cuda": os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-# Determina il dispositivo (MPS per Mac M1/M2/M3, CUDA per NVIDIA, o CPU)
-if torch.backends.mps.is_available():  # Controlla prima per MPS
-    device = torch.device("mps")
-elif torch.cuda.is_available():  # Poi controlla per CUDA
-    device = torch.device("cuda:0")  # Usa la prima GPU disponibile
-else:  # Altrimenti usa la CPU
-    device = torch.device("cpu")
+PAD_TOKEN_ID = 0 # Default, can be overridden by tokenizer
+IGNORE_INDEX = -100 # For CrossEntropyLoss with BERT slots
 
-print(f"Dispositivo selezionato per PyTorch: {device}")
+# ==============================================================================
+# --- Data Loading Function ---
+# ==============================================================================
 
-if device.type == "cuda":
-    # Usato per reportare errori specifici sul lato CUDA
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-# L'indice PAD_TOKEN è 0, che è anche l'ID del token [PAD] per la maggior parte dei tokenizer di BERT (incluso bert-base-uncased)
-PAD_TOKEN_ID = 0  # Sarà sovrascritto dopo aver inizializzato il tokenizer
-IGNORE_INDEX = -100  # Indice speciale per le etichette di slot da IGNORARE
-
-
-# --- Caricamento Dati ---
 def load_data(path):
-    """
-    input: path/to/data (percorso del file JSON)
-    output: lista di dizionari (il dataset caricato)
-    """
-    dataset = []
+    """Loads a dataset from a JSON file."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            dataset = json.loads(f.read())
-    except FileNotFoundError:
-        print(f"Errore: File dati non trovato in {path}")
-        print(
-            "Assicurati che i file del dataset ATIS (train.json, test.json) siano nella directory 'dataset/ATIS'."
-        )
-        print("Potrebbe essere necessario scaricarli.")
-        exit()
-    except json.JSONDecodeError:
-        print(
-            f"Errore: Impossibile decodificare JSON da {path}. Controlla il formato del file."
-        )
-        exit()
-    return dataset
+        with open(path, "r", encoding="utf-8") as f: return json.loads(f.read())
+    except FileNotFoundError: print(f"CRITICAL ERROR: Data file not found at {path}."); exit()
+    except json.JSONDecodeError: print(f"CRITICAL ERROR: Could not decode JSON from {path}."); exit()
 
+# ==============================================================================
+# --- Lang Class (Label Vocabulary Management for BERT) ---
+# ==============================================================================
 
-# --- Classe Lang (Gestione Vocabolari SOLO per Etichette) ---
 class Lang:
-    """Classe helper per gestire i mapping tra label di intent/slot e indici numerici.
-    Non gestisce il vocabolario delle parole, che è gestito dal tokenizer di BERT."""
+    """Manages mappings for intent/slot labels to numerical IDs for BERT."""
+    def __init__(self, intent_labels_set, slot_labels_set):
+        self.slot2id = self._build_label_vocab(slot_labels_set, add_pad=True, pad_id_val=PAD_TOKEN_ID)
+        self.intent2id = self._build_label_vocab(intent_labels_set, add_pad=False)
+        self.id2slot = {idx: slot for slot, idx in self.slot2id.items()}
+        self.id2intent = {idx: intent for intent, idx in self.intent2id.items()}
 
-    def __init__(self, intents, slots):
-        """
-        Inizializza i dizionari intent2id, slot2id e i loro inversi.
-        Args:
-            intents (set): Set di tutte le etichette di intent uniche.
-            slots (set): Set di tutte le etichette di slot uniche.
-        """
-        self.slot2id = self.lab2id(slots, pad=True)
-        self.intent2id = self.lab2id(intents, pad=False)
-        self.id2slot = {v: k for k, v in self.slot2id.items()}
-        self.id2intent = {v: k for k, v in self.intent2id.items()}
-
-    def lab2id(self, elements, pad=True):
-        """Costruisce il dizionario label -> id (per slot e intenti)."""
-        vocab = {}
-        if pad:
-            vocab["pad"] = PAD_TOKEN_ID
-        for elem in sorted(list(elements)):
-            if elem not in vocab:
-                vocab[elem] = len(vocab)
+    def _build_label_vocab(self, labels_set, add_pad=True, pad_id_val=0):
+        vocab = {"pad": pad_id_val} if add_pad else {}
+        for label in sorted(list(labels_set)):
+            if label not in vocab: vocab[label] = len(vocab)
         return vocab
 
+# ==============================================================================
+# --- PyTorch Dataset Class (IntentsAndSlotsBERT) ---
+# Handles ATIS data tokenization with BERT and aligns slot labels.
+# ==============================================================================
 
-# --- Classe Dataset (IntentsAndSlots per BERT) ---
 class IntentsAndSlotsBERT(data.Dataset):
-    """Classe Dataset custom per PyTorch per gestire il dataset ATIS con tokenizzazione BERT."""
+    """Custom Dataset for ATIS with BERT tokenization and slot label alignment."""
+    def __init__(self, raw_dataset_items, lang_obj, tokenizer: BertTokenizerFast, max_len=50):
+        self.lang = lang_obj; self.tokenizer = tokenizer; self.max_len = max_len
+        self.ignore_index_val = IGNORE_INDEX
+        self.processed_input_ids, self.processed_attention_masks, self.processed_token_type_ids = [], [], []
+        self.processed_intent_labels, self.processed_slot_labels = [], []
+        self.original_words_list_batch, self.original_slot_labels_list_batch, self.word_ids_list_batch = [], [], []
 
-    def __init__(self, dataset, lang, tokenizer, max_len=50):
-        """
-        Inizializza il dataset, tokenizza con BERT e allinea le etichette di slot.
-        Args:
-            dataset (list): Lista di dizionari (dati grezzi).
-            lang (Lang): Oggetto Lang contenente i vocabolari delle etichette.
-            tokenizer (BertTokenizerFast): Tokenizer di BERT Fast.
-            max_len (int): Lunghezza massima delle sequenze dopo tokenizzazione BERT.
-        """
-        self.utterances = []
-        self.intents = []
-        self.slots = []
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.lang = lang
-
-        self.input_ids = []
-        self.attention_masks = []
-        self.token_type_ids = []
-        self.intent_labels = []
-        self.slot_labels = []
-
-        self.original_words = []
-        self.original_slot_labels = []
-        self.word_ids_list = []
-
-        self.ignore_index = IGNORE_INDEX
-        self.pad_token_id = tokenizer.pad_token_id
-
-        for item in dataset:
-            utterance = item["utterance"]
-            original_words = utterance.split()
-            original_slot_labels = item["slots"].split()
-
-            # --- Tokenizzazione e Allineamento ---
-            # --- MODIFICA: Rimuovi return_word_ids da encode_plus ---
-            encoded_inputs = tokenizer.encode_plus(
-                utterance,
-                max_length=self.max_len,
-                padding="max_length",
-                truncation=True,
-                return_attention_mask=True,
-                return_token_type_ids=True,
-                return_tensors="pt",
-                # return_word_ids=True, # <-- Rimosso da qui
+        for item in raw_dataset_items:
+            utterance_text = item["utterance"]
+            original_words = utterance_text.split(); original_slot_labels_str = item["slots"].split()
+            encoded_utterance = tokenizer.encode_plus(
+                utterance_text, max_length=self.max_len, padding="max_length", truncation=True,
+                return_attention_mask=True, return_token_type_ids=True, return_tensors="pt"
             )
-            # --- Fine Modifica ---
+            current_input_ids = encoded_utterance["input_ids"].squeeze(0)
+            current_word_ids = encoded_utterance.word_ids(batch_index=0)
+            if current_word_ids is None: print(f"Warning: word_ids not obtained for: {utterance_text}. Skipping."); continue
 
-            input_ids = encoded_inputs["input_ids"].squeeze(0)
-            attention_mask = encoded_inputs["attention_mask"].squeeze(0)
-            token_type_ids = encoded_inputs["token_type_ids"].squeeze(0)
+            aligned_slot_label_ids = [self.ignore_index_val] * len(current_input_ids)
+            previous_word_idx = -1
+            for token_pos, word_idx in enumerate(current_word_ids):
+                if word_idx is not None: # Token corresponds to a word
+                    if word_idx != previous_word_idx: # First sub-token of the word
+                        if word_idx < len(original_slot_labels_str):
+                            aligned_slot_label_ids[token_pos] = self.lang.slot2id.get(original_slot_labels_str[word_idx], self.ignore_index_val)
+                    previous_word_idx = word_idx
+            
+            self.processed_input_ids.append(current_input_ids)
+            self.processed_attention_masks.append(encoded_utterance["attention_mask"].squeeze(0))
+            self.processed_token_type_ids.append(encoded_utterance["token_type_ids"].squeeze(0))
+            self.processed_intent_labels.append(self.lang.intent2id.get(item["intent"], -1))
+            self.processed_slot_labels.append(torch.LongTensor(aligned_slot_label_ids))
+            self.original_words_list_batch.append(original_words)
+            self.original_slot_labels_list_batch.append(original_slot_labels_str)
+            self.word_ids_list_batch.append(current_word_ids)
 
-            # --- MODIFICA: Ottieni word_ids separatamente ---
-            # encode_plus restituisce un oggetto BatchEncoding che ha il metodo word_ids()
-            word_ids = encoded_inputs.word_ids(batch_index=0)
-            # --- Fine Modifica ---
-
-            # Verifica che word_ids sia stato ottenuto correttamente
-            if word_ids is None:
-                print(
-                    f"Warning: word_ids non ottenuto per utterance: {utterance}. L'allineamento potrebbe fallire."
-                )
-                # Puoi decidere se saltare questo campione o usare un placeholder
-                # word_ids = [None] * len(input_ids) # Placeholder (ma non ideale)
-                continue  # Salta questo campione se word_ids non è disponibile
-
-            # --- Gestione Etichette Slot con Allineamento Sub-token ---
-            aligned_slot_labels = [self.ignore_index] * len(input_ids)
-            last_word_id = None
-            for token_idx, word_id in enumerate(word_ids):
-                if token_idx >= len(input_ids):
-                    break
-                if word_id is not None:
-                    is_first_subtoken = last_word_id is None or word_id != last_word_id
-                    if is_first_subtoken:
-                        if word_id < len(original_slot_labels):
-                            original_slot_label = original_slot_labels[word_id]
-                            slot_label_id = self.lang.slot2id.get(
-                                original_slot_label, self.ignore_index
-                            )
-                            aligned_slot_labels[token_idx] = slot_label_id
-                        else:
-                            aligned_slot_labels[token_idx] = self.ignore_index
-                if word_id is not None:
-                    last_word_id = word_id
-                else:
-                    last_word_id = None
-            assert len(aligned_slot_labels) == len(input_ids)
-
-            # --- Gestione Etichetta Intent ---
-            intent_label_id = self.lang.intent2id.get(item["intent"], self.ignore_index)
-
-            # Salva i dati processati
-            self.input_ids.append(input_ids)
-            self.attention_masks.append(attention_mask)
-            self.token_type_ids.append(token_type_ids)
-            self.intent_labels.append(intent_label_id)
-            self.slot_labels.append(torch.LongTensor(aligned_slot_labels))
-            self.original_words.append(original_words)
-            self.original_slot_labels.append(original_slot_labels)
-            self.word_ids_list.append(word_ids)
-
-    def __len__(self):
-        return len(self.input_ids)
-
+    def __len__(self): return len(self.processed_input_ids)
     def __getitem__(self, idx):
-        # Restituisce i dati tokenizzati e allineati come tensori, più le info originali per eval
-        sample = {
-            "input_ids": self.input_ids[idx],
-            "attention_mask": self.attention_masks[idx],
-            "token_type_ids": self.token_type_ids[idx],
-            "intent_labels": self.intent_labels[idx],
-            "slot_labels": self.slot_labels[idx],
-            "original_words": self.original_words[idx],
-            "original_slot_labels": self.original_slot_labels[idx],
-            "word_ids": self.word_ids_list[idx],
+        return {
+            "input_ids": self.processed_input_ids[idx], "attention_mask": self.processed_attention_masks[idx],
+            "token_type_ids": self.processed_token_type_ids[idx], "intent_labels": self.processed_intent_labels[idx],
+            "slot_labels": self.processed_slot_labels[idx], "original_words": self.original_words_list_batch[idx],
+            "original_slot_labels": self.original_slot_labels_list_batch[idx], "word_ids": self.word_ids_list_batch[idx],
         }
-        return sample
 
+# ==============================================================================
+# --- Collate Function for DataLoader (BERT) ---
+# ==============================================================================
 
-# --- Funzione Collate (per DataLoader con input BERT) ---
-def collate_fn_bert(data):
-    """
-    Funzione custom per creare un batch da campioni tokenizzati BERT.
-    Gestisce lo stacking dei tensori e li sposta sul device.
-    Raccoglie anche le liste di info originali e word_ids (non le stacka).
-    """
-    input_ids = torch.stack([d["input_ids"] for d in data])
-    attention_masks = torch.stack([d["attention_mask"] for d in data])
-    token_type_ids = torch.stack([d["token_type_ids"] for d in data])
-    intent_labels = torch.LongTensor([d["intent_labels"] for d in data])
-    slot_labels = torch.stack([d["slot_labels"] for d in data])
-    original_words_batch = [d["original_words"] for d in data]
-    original_slot_labels_batch = [d["original_slot_labels"] for d in data]
-    word_ids_batch = [d["word_ids"] for d in data]
+def collate_fn_bert(batch_samples):
+    """Collates BERT samples: stacks tensors, moves to device, keeps lists as Python lists."""
+    input_ids = torch.stack([s["input_ids"] for s in batch_samples])
+    attention_masks = torch.stack([s["attention_mask"] for s in batch_samples])
+    token_type_ids = torch.stack([s["token_type_ids"] for s in batch_samples])
+    intent_labels = torch.LongTensor([s["intent_labels"] for s in batch_samples])
+    slot_labels = torch.stack([s["slot_labels"] for s in batch_samples])
 
-    input_ids = input_ids.to(device)
-    attention_masks = attention_masks.to(device)
-    token_type_ids = token_type_ids.to(device)
-    intent_labels = intent_labels.to(device)
-    slot_labels = slot_labels.to(device)
-
-    batch = {
-        "input_ids": input_ids,
-        "attention_mask": attention_masks,
-        "token_type_ids": token_type_ids,
-        "intent_labels": intent_labels,
-        "slot_labels": slot_labels,
-        "original_words": original_words_batch,
-        "original_slot_labels": original_slot_labels_batch,
-        "word_ids": word_ids_batch,
+    return { # Tensors moved to device, lists remain as Python lists
+        "input_ids": input_ids.to(device), "attention_mask": attention_masks.to(device),
+        "token_type_ids": token_type_ids.to(device), "intent_labels": intent_labels.to(device),
+        "slot_labels": slot_labels.to(device),
+        "original_words": [s["original_words"] for s in batch_samples],
+        "original_slot_labels": [s["original_slot_labels"] for s in batch_samples],
+        "word_ids": [s["word_ids"] for s in batch_samples],
     }
-    return batch
 
+# ==============================================================================
+# --- Weight Initialization (Optional for new Linear Layers) ---
+# ==============================================================================
 
-# --- Inizializzazione Pesi (Opzionale per i nuovi layer) ---
-def init_weights_linear(mat):
-    for m in mat.modules():
-        if type(m) in [nn.Linear]:
+def init_weights_linear(module_with_linear_layers):
+    """Initializes weights for nn.Linear layers (if not using default init)."""
+    for m in module_with_linear_layers.modules():
+        if isinstance(m, nn.Linear):
             torch.nn.init.uniform_(m.weight, -0.01, 0.01)
-            if m.bias is not None:
-                m.bias.data.fill_(0.01)
-
-
-# --- END OF FILE utils.py ---
+            if m.bias is not None: m.bias.data.fill_(0.01)
