@@ -235,27 +235,5 @@ def _pad_sequences(sequences_list):
         
     return padded_sequences_tensor, torch.LongTensor(lengths)
 
-# ==============================================================================
-# --- Weight Initialization Function ---
-# ==============================================================================
 
-def init_weights(model_module):
-    """
-    Initializes weights of RNN and Linear layers in the model.
-    Args:
-        model_module (nn.Module): The model to initialize.
-    """
-    for module in model_module.modules():
-        if isinstance(module, (nn.GRU, nn.LSTM, nn.RNN)):
-            for name, param in module.named_parameters():
-                if "weight_ih" in name: # Input-to-hidden weights
-                    torch.nn.init.xavier_uniform_(param.data)
-                elif "weight_hh" in name: # Hidden-to-hidden weights
-                    torch.nn.init.orthogonal_(param.data)
-                elif "bias" in name:
-                    param.data.fill_(0) # Biases to zero
-        elif isinstance(module, nn.Linear):
-            torch.nn.init.uniform_(module.weight, -0.01, 0.01) # Small uniform for linear weights
-            if module.bias is not None:
-                module.bias.data.fill_(0.01) # Small constant for linear biases
 
