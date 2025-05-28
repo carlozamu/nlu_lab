@@ -1,162 +1,199 @@
 import os
 from tqdm import tqdm
-import numpy as np
-import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import classification_report
-from collections import Counter 
-from tabulate import tabulate 
-import copy 
-
-from utils import device, IGNORE_INDEX, Lang, IntentsAndSlotsBERT, collate_fn_bert, load_data, train_test_split
-from model import JointBERTModel
+from collections import Counter
+from tabulate import tabulate
+import copy
 from functions import train_loop_bert, eval_loop_bert
-from conll import evaluate as conll_evaluate
-
+from utils import (
+    device,
+    IGNORE_INDEX,
+    Lang,
+    IntentsAndSlotsBERT,
+    collate_fn_bert,
+    load_data,
+)
+from model import JointBERTModel
 from transformers import BertTokenizerFast
+from sklearn.model_selection import train_test_split
 
-# ==============================================================================
-# --- MAIN EXECUTION BLOCK  ---
-# ==============================================================================
 if __name__ == "__main__":
+    BERT_MODEL_NAME = "bert-base-uncased"
+    LEARNING_RATE = 5e-5
+    DROPOUT_RATE = 0.3
+    BATCH_SIZE_TRAIN = 128
+    BATCH_SIZE_EVAL = 128
+    MAX_EPOCHS = 50
+    EARLY_STOP_PATIENCE = 10
+    GRAD_CLIP = 1.0
+    MAX_SEQ_LENGTH = 50
 
-    bert_model_name_config = 'bert-base-uncased'
-    learning_rate_config = 5e-5
-    dropout_rate_config = 0.3
-    batch_size_train_config = 128
-    batch_size_eval_config = 128
+    config_name = f"BERT_Best_{BERT_MODEL_NAME.split('/')[-1]}_DR{DROPOUT_RATE}_LR{LEARNING_RATE}_BS{BATCH_SIZE_TRAIN}"
+    print(f"\n--- Running: {config_name} (Device: {device}) ---")
 
-    max_epochs_config = 50
-    early_stop_patience_config = 10
-    grad_clip_config = 1.0
-    max_seq_length_config = 50
-    
-    config_run_name_str = f"BERT_Best_{bert_model_name_config.split('/')[-1]}_DR{dropout_rate_config}_LR{learning_rate_config}_BS{batch_size_train_config}"
-    print(f"\n--- Running Configuration: {config_run_name_str} ---")
-    print(f"Device: {device}")
+    # --- Data Loading and Preprocessing ---
+    data_dir = os.environ.get("ATIS_DATA_DIR", os.path.join("dataset", "ATIS"))
+    if not os.path.exists(os.path.join(data_dir, "train.json")):
+        print(f"CRITICAL ERROR: Dataset not found at {data_dir}.")
+        exit()
+    tmp_train_raw = load_data(os.path.join(data_dir, "train.json"))
+    test_raw = load_data(os.path.join(data_dir, "test.json"))
 
-    # --- Data Loading and Preprocessing  ---
-    print("Loading ATIS data...")
-    data_dir_path = os.environ.get("ATIS_DATA_DIR", os.path.join("dataset", "ATIS"))
-    if not os.path.exists(os.path.join(data_dir_path, "train.json")):
-        data_dir_path = os.path.join("dataset", "ATIS")
-        if not os.path.exists(os.path.join(data_dir_path, "train.json")):
-            print(f"CRITICAL ERROR: Dataset not found at {data_dir_path} or ./dataset/ATIS.")
-            exit()
-            
-    tmp_train_raw = load_data(os.path.join(data_dir_path, "train.json"))
-    test_raw = load_data(os.path.join(data_dir_path, "test.json"))
+    dev_portion = 0.10
+    intents_full = [x["intent"] for x in tmp_train_raw]
+    intent_counts = Counter(intents_full)
+    strat_inputs, strat_labels, single_instance = [], [], []
+    for i, intent_val in enumerate(intents_full):
+        if intent_counts[intent_val] > 1:
+            strat_inputs.append(tmp_train_raw[i])
+            strat_labels.append(intent_val)
+        else:
+            single_instance.append(tmp_train_raw[i])
 
-    # Create dev set
-    portion = 0.10
-    intents_all = [x['intent'] for x in tmp_train_raw]
-    count_y = Counter(intents_all)
-    labels_strat, inputs_strat, mini_train_strat = [], [], []
-    for i, intent_val in enumerate(intents_all):
-        if count_y[intent_val] > 1:
-            inputs_strat.append(tmp_train_raw[i]); labels_strat.append(intent_val)
-        else: mini_train_strat.append(tmp_train_raw[i])
-    if len(inputs_strat) > 1 and len(set(labels_strat)) > 1:
-        X_train_data, X_dev_data, _, _ = train_test_split(inputs_strat, labels_strat, test_size=portion, random_state=42, shuffle=True, stratify=labels_strat)
-        train_raw = X_train_data + mini_train_strat; dev_raw = X_dev_data
+    if len(strat_inputs) > 1 and len(set(strat_labels)) > 1:
+        train_s, dev_s, _, _ = train_test_split(
+            strat_inputs,
+            strat_labels,
+            test_size=dev_portion,
+            random_state=42,
+            shuffle=True,
+            stratify=strat_labels,
+        )
+        train_raw = train_s + single_instance
+        dev_raw = dev_s
     else:
-        num_dev = int(len(tmp_train_raw) * portion)
-        if num_dev > 0 and len(tmp_train_raw) - num_dev > 0: train_raw, dev_raw = train_test_split(tmp_train_raw, test_size=portion, random_state=42, shuffle=True)
-        else: train_raw = tmp_train_raw; dev_raw = []
-    
-    # Create Lang object (for BERT, only manages label vocabularies)
-    corpus_all_data = train_raw + (dev_raw if dev_raw else []) + test_raw
-    slots_for_lang = set(sum([line['slots'].split() for line in corpus_all_data], []))
-    intents_for_lang = set([line['intent'] for line in corpus_all_data])
-    lang = Lang(intents_for_lang, slots_for_lang) # Adapted Lang for BERT
-    
-    # Initialize BERT Tokenizer
-    tokenizer = BertTokenizerFast.from_pretrained(bert_model_name_config)
+        num_dev_fb = int(len(tmp_train_raw) * dev_portion)
+        if num_dev_fb > 0 and len(tmp_train_raw) - num_dev_fb > 0:
+            train_raw, dev_raw = train_test_split(
+                tmp_train_raw, test_size=dev_portion, random_state=42, shuffle=True
+            )
+        else:
+            train_raw = tmp_train_raw
+            dev_raw = []
 
-    # Create Datasets (BERT specific)
-    train_dataset = IntentsAndSlotsBERT(train_raw, lang, tokenizer, max_len=max_seq_length_config)
-    dev_dataset = IntentsAndSlotsBERT(dev_raw, lang, tokenizer, max_len=max_seq_length_config) if dev_raw else None
-    test_dataset = IntentsAndSlotsBERT(test_raw, lang, tokenizer, max_len=max_seq_length_config)
-    print("Data preparation and Dataset creation finished.")
+    corpus_labels = train_raw + (dev_raw if dev_raw else []) + test_raw
+    slots_vocab = set(sum([line["slots"].split() for line in corpus_labels], []))
+    intents_vocab = set([line["intent"] for line in corpus_labels])
+    # For BERT, Lang only manages label vocabularies
+    lang = Lang(intents_vocab, slots_vocab)
 
-    # DataLoaders (BERT specific collate_fn)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_train_config, collate_fn=collate_fn_bert, shuffle=True)
-    dev_loader = DataLoader(dev_dataset, batch_size=batch_size_eval_config, collate_fn=collate_fn_bert) if dev_dataset else None
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_eval_config, collate_fn=collate_fn_bert)
+    # --- Tokenizer, Datasets, DataLoaders (BERT specific) ---
+    tokenizer = BertTokenizerFast.from_pretrained(BERT_MODEL_NAME)
+
+    train_dataset = IntentsAndSlotsBERT(
+        train_raw, lang, tokenizer, max_len=MAX_SEQ_LENGTH
+    )
+    dev_dataset = (
+        IntentsAndSlotsBERT(dev_raw, lang, tokenizer, max_len=MAX_SEQ_LENGTH)
+        if dev_raw
+        else None
+    )
+    test_dataset = IntentsAndSlotsBERT(
+        test_raw, lang, tokenizer, max_len=MAX_SEQ_LENGTH
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE_TRAIN,
+        collate_fn=collate_fn_bert,
+        shuffle=True,
+    )
+    dev_loader = (
+        DataLoader(dev_dataset, batch_size=BATCH_SIZE_EVAL, collate_fn=collate_fn_bert)
+        if dev_dataset
+        else None
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=BATCH_SIZE_EVAL, collate_fn=collate_fn_bert
+    )
 
     # --- Model, Optimizer, Loss (BERT specific) ---
-    print("Initializing BERT Model, Optimizer, and Loss criteria...")
-    num_intent_labels_model = len(lang.intent2id)
-    num_slot_labels_model = len(lang.slot2id)
-
     model = JointBERTModel(
-        num_intent_labels=num_intent_labels_model,
-        num_slot_labels=num_slot_labels_model,
-        bert_model_name=bert_model_name_config,
-        dropout_rate=dropout_rate_config
+        num_intent_labels=len(lang.intent2id),
+        num_slot_labels=len(lang.slot2id),
+        bert_model_name=BERT_MODEL_NAME,
+        dropout_rate=DROPOUT_RATE,
     ).to(device)
-    # Note: No model.apply(init_weights) for BERT pre-trained body. New heads are auto-initialized.
-
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate_config) # AdamW for BERT
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion_intents = nn.CrossEntropyLoss()
-    criterion_slots = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) # Use IGNORE_INDEX
-    print("Initialization complete.")
+    criterion_slots = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
     # --- Training Loop (BERT specific) ---
-    print("Starting fine-tuning...")
-    best_f1_dev_run = 0.0
-    current_patience_run = early_stop_patience_config
-    best_model_state_dict_run = copy.deepcopy(model.state_dict())
+    best_f1_dev = 0.0
+    patience_counter = EARLY_STOP_PATIENCE
+    best_model_state = copy.deepcopy(model.state_dict())
 
     if not dev_loader:
-        tqdm.write(f"Fine-tuning for {max_epochs_config} epochs (no dev set for early stopping)...")
-        for epoch_idx in tqdm(range(1, max_epochs_config + 1), desc=f"Fine-tuning {config_run_name_str}", unit="epoch"):
-            train_loop_bert(train_loader, optimizer, criterion_slots, criterion_intents, model, grad_clip_config)
-        best_model_state_dict_run = copy.deepcopy(model.state_dict())
+        tqdm.write(
+            f"Fine-tuning for {MAX_EPOCHS} epochs (no dev set for early stopping)..."
+        )
+        for epoch in tqdm(range(1, MAX_EPOCHS + 1), desc=f"Fine-tuning", unit="epoch"):
+            train_loop_bert(
+                train_loader,
+                optimizer,
+                criterion_slots,
+                criterion_intents,
+                model,
+                GRAD_CLIP,
+            )
+        best_model_state = copy.deepcopy(model.state_dict())  # Save last model state
     else:
-        epoch_pbar = tqdm(range(1, max_epochs_config + 1), desc=f"Fine-tuning {config_run_name_str}", unit="epoch")
+        epoch_pbar = tqdm(
+            range(1, MAX_EPOCHS + 1),
+            desc=f"Fine-tuning {BERT_MODEL_NAME.split('/')[-1]}",
+            unit="epoch",
+        )
         for epoch_num in epoch_pbar:
-            train_loss_val = train_loop_bert(train_loader, optimizer, criterion_slots, criterion_intents, model, grad_clip_config)
-            f1_dev_val, acc_dev_val, loss_dev_val = eval_loop_bert(dev_loader, criterion_slots, criterion_intents, model, lang, tokenizer) # Pass tokenizer to eval_loop_bert
-            
-            epoch_pbar.set_postfix({
-                "TrainLoss": f"{train_loss_val:.4f}", "DevLoss": f"{loss_dev_val:.4f}",
-                "DevF1": f"{f1_dev_val:.4f}", "DevAcc": f"{acc_dev_val:.4f}"
-            })
+            train_loss = train_loop_bert(
+                train_loader,
+                optimizer,
+                criterion_slots,
+                criterion_intents,
+                model,
+                GRAD_CLIP,
+            )
+            dev_f1, dev_acc, dev_loss = eval_loop_bert(
+                dev_loader, criterion_slots, criterion_intents, model, lang, tokenizer
+            )
 
-            if f1_dev_val > best_f1_dev_run:
-                best_f1_dev_run = f1_dev_val
-                current_patience_run = early_stop_patience_config
-                best_model_state_dict_run = copy.deepcopy(model.state_dict())
+            epoch_pbar.set_postfix(
+                {
+                    "TrainLoss": f"{train_loss:.4f}",
+                    "DevLoss": f"{dev_loss:.4f}",
+                    "DevF1": f"{dev_f1:.4f}",
+                    "DevAcc": f"{dev_acc:.4f}",
+                }
+            )
+            if dev_f1 > best_f1_dev:
+                best_f1_dev = dev_f1
+                best_model_state = copy.deepcopy(model.state_dict())
+                patience_counter = EARLY_STOP_PATIENCE
             else:
-                current_patience_run -= 1
-            if current_patience_run <= 0:
+                patience_counter -= 1
+            if patience_counter <= 0:
                 tqdm.write(f"\nEarly stopping at epoch {epoch_num}.")
                 break
         epoch_pbar.close()
-    print("--- Fine-tuning Finished ---")
-    
+
     # --- Final Evaluation on Test Set ---
-    if best_model_state_dict_run:
-        print("\nEvaluating best model on Test Set...")
-        model.load_state_dict(best_model_state_dict_run)
-        test_f1, test_acc, test_loss = eval_loop_bert(test_loader, criterion_slots, criterion_intents, model, lang, tokenizer) # Pass tokenizer
-        
+    if best_model_state:
+        model.load_state_dict(best_model_state)
+        test_f1, test_acc, test_loss = eval_loop_bert(
+            test_loader, criterion_slots, criterion_intents, model, lang, tokenizer
+        )
+
         print("\n--- FINAL TEST RESULTS (BERT Best Config) ---")
-        results_display_data = [
+        results_data = [
             ["Metric", "Value"],
-            ["Configuration", config_run_name_str],
+            ["Configuration", config_name],
             ["Test Slot F1", f"{test_f1:.4f}"],
             ["Test Intent Accuracy", f"{test_acc:.4f}"],
-            ["Test Loss (average)", f"{test_loss:.4f}"]
+            ["Test Loss (average)", f"{test_loss:.4f}"],
         ]
-        print(tabulate(results_display_data, headers="firstrow", tablefmt="grid"))
+        print(tabulate(results_data, headers="firstrow", tablefmt="grid"))
     else:
         print("CRITICAL ERROR: No model state available for final BERT testing.")
 
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    
-    print(f"\n--- Script Finished: {config_run_name_str} ---")
+    print(f"\n--- Script Finished: {config_name} ---")

@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,7 +12,7 @@ from tqdm import tqdm
 try:
     from functions import train_loop, eval_loop, init_weights
     from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
-    from model import LM_LSTM_With_Dropout # Model for Step A3
+    from model import LM_LSTM_With_Dropout  # Model for Step A3
 except ImportError as e:
     print(f"Error importing modules: {e}. Ensure they are accessible.")
     exit()
@@ -28,15 +27,15 @@ if __name__ == "__main__":
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Device: {DEVICE}")
 
-    experiment_step = "Part1A_Step3_Best" # Identifier for this specific run
-    model_save_dir = "bin"                 # Directory to save the model
+    experiment_step = "Part1A_Step3_Best"  # Identifier for this specific run
+    model_save_dir = "bin"  # Directory to save the model
 
     # Fixed parameters for the best A3 configuration
     lr = 0.001
     batch_size = 16
     hid = 300
     emb = 200
-    clip_grad_norm_value = 5 # Renamed for clarity, original 'clip' was 5
+    clip_grad_norm_value = 5  # Renamed for clarity, original 'clip' was 5
     n_epochs = 100
     patience_setting = 3
     emb_dropout_rate = 0.1
@@ -52,7 +51,9 @@ if __name__ == "__main__":
         test_raw = read_file("./dataset/PennTreeBank/ptb.test.txt")
         lang = Lang(train_raw, ["<pad>", "<eos>"])
         vocab_len = len(lang.word2id)
-        pad_token_id = lang.word2id["<pad>"] # Used for collate_fn and loss ignore_index
+        pad_token_id = lang.word2id[
+            "<pad>"
+        ]  # Used for collate_fn and loss ignore_index
         print("Data loaded.")
     except FileNotFoundError as e:
         print(f"Error: Dataset not found: {e}")
@@ -77,18 +78,18 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE),
+        collate_fn=partial(collate_fn, pad_token_id=pad_token_id, device=DEVICE),
         drop_last=True,
     )
     dev_loader = DataLoader(
         dev_dataset,
         batch_size=batch_size * 2,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE),
+        collate_fn=partial(collate_fn, pad_token_id=pad_token_id, device=DEVICE),
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size * 2,
-        collate_fn=partial(collate_fn, pad_token=pad_token_id, DEVICE=DEVICE),
+        collate_fn=partial(collate_fn, pad_token_id=pad_token_id, device=DEVICE),
     )
 
     # --- Model, Optimizer, Loss Initialization ---
@@ -101,7 +102,7 @@ if __name__ == "__main__":
         emb_dropout=emb_dropout_rate,
         fc_dropout=fc_dropout_rate,
     ).to(DEVICE)
-    model.apply(init_weights) # Apply custom weight initialization
+    model.apply(init_weights)  # Apply custom weight initialization
 
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     criterion_train = nn.CrossEntropyLoss(ignore_index=pad_token_id)
@@ -114,7 +115,7 @@ if __name__ == "__main__":
     print("Starting Training...")
     patience = patience_setting
     best_dev_ppl = math.inf
-    best_model_state_dict = None # Store the state_dict of the best model
+    best_model_state_dict = None  # Store the state_dict of the best model
 
     pbar = tqdm(range(1, n_epochs + 1), desc="Epoch", leave=True)
     for epoch in pbar:
@@ -122,7 +123,11 @@ if __name__ == "__main__":
         # Assuming 'functions.train_loop' expects 'clip' as original
         # If functions.py was updated to 'clip_value', adjust here.
         train_loss = train_loop(
-            train_loader, optimizer, criterion_train, model, clip=clip_grad_norm_value
+            train_loader,
+            optimizer,
+            criterion_train,
+            model,
+            clip_value=clip_grad_norm_value,
         )
 
         # Evaluation step
@@ -148,7 +153,7 @@ if __name__ == "__main__":
     final_test_ppl = math.inf
     if best_model_state_dict is not None:
         print("\nEvaluating best model on Test Set...")
-        model.load_state_dict(best_model_state_dict) # Load best model state
+        model.load_state_dict(best_model_state_dict)  # Load best model state
         model.eval()
         with torch.no_grad():
             final_test_ppl, _ = eval_loop(test_loader, criterion_eval, model)
@@ -157,7 +162,7 @@ if __name__ == "__main__":
 
         # Save the best model state_dict
         print("\nSaving best model state dict...")
-        os.makedirs(model_save_dir, exist_ok=True) # Ensure save directory exists
+        os.makedirs(model_save_dir, exist_ok=True)  # Ensure save directory exists
         model_filename = f"{experiment_step}_lr{lr}_bs{batch_size}.pt"
         model_save_path = os.path.join(model_save_dir, model_filename)
         try:
@@ -166,6 +171,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"   Error saving model: {e}")
     else:
-        print("\nNo best model state saved (training might have failed or not improved).")
+        print(
+            "\nNo best model state saved (training might have failed or not improved)."
+        )
 
     print(f"\n--- Script {experiment_step} Finished ---")

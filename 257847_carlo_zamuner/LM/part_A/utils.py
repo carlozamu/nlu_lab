@@ -1,6 +1,6 @@
-
 import torch
-import torch.utils.data as data # Used as a base class for PennTreeBank
+import torch.utils.data as data  # Used as a base class for PennTreeBank
+
 
 # ==============================================================================
 # --- FILE READING FUNCTION ---
@@ -16,12 +16,13 @@ def read_file(path: str, eos_token: str = "<eos>") -> list[str]:
         list[str]: List of sentences, each ending with eos_token.
     """
     output = []
-    with open(path, "r", encoding="utf-8") as f: # Added encoding for robustness
-        for line in f: # Iterate directly over file object
+    with open(path, "r", encoding="utf-8") as f:  # Added encoding for robustness
+        for line in f:  # Iterate directly over file object
             stripped_line = line.strip()
-            if stripped_line: # Process only non-empty lines
+            if stripped_line:  # Process only non-empty lines
                 output.append(stripped_line + " " + eos_token)
     return output
+
 
 # ==============================================================================
 # --- VOCABULARY CREATION FUNCTION ---
@@ -50,6 +51,7 @@ def get_vocab(corpus: list[str], special_tokens: list[str] = []) -> dict[str, in
                 idx += 1
     return vocab
 
+
 # ==============================================================================
 # --- LANGUAGE UTILITY CLASS ---
 # ==============================================================================
@@ -57,6 +59,7 @@ class Lang:
     """
     Manages vocabulary, providing word-to-id and id-to-word mappings.
     """
+
     def __init__(self, corpus: list[str], special_tokens: list[str] = []):
         """
         Args:
@@ -66,7 +69,9 @@ class Lang:
         # Use the external get_vocab function
         self.word2id = get_vocab(corpus, special_tokens)
         self.id2word = {v: k for k, v in self.word2id.items()}
+
     # Removed duplicated get_vocab method from the original class
+
 
 # ==============================================================================
 # --- PennTreeBank DATASET CLASS ---
@@ -76,6 +81,7 @@ class PennTreeBank(data.Dataset):
     PyTorch Dataset for the Penn Treebank, creating source/target pairs for
     language modeling.
     """
+
     def __init__(self, corpus: list[str], lang_obj: Lang):
         """
         Args:
@@ -86,34 +92,45 @@ class PennTreeBank(data.Dataset):
         targets_as_tokens = []
         for sentence in corpus:
             tokens = sentence.split()
-            if len(tokens) > 1: # Ensure there's at least one token for source and one for target
-                sources_as_tokens.append(tokens[:-1]) # All but the last token (e.g., <eos>)
+            if (
+                len(tokens) > 1
+            ):  # Ensure there's at least one token for source and one for target
+                sources_as_tokens.append(
+                    tokens[:-1]
+                )  # All but the last token (e.g., <eos>)
                 targets_as_tokens.append(tokens[1:])  # All but the first token
         # Convert token sequences to ID sequences
-        self.source_ids = self._map_sequences_to_ids(sources_as_tokens, lang_obj.word2id)
-        self.target_ids = self._map_sequences_to_ids(targets_as_tokens, lang_obj.word2id)
+        self.source_ids = self._map_sequences_to_ids(
+            sources_as_tokens, lang_obj.word2id
+        )
+        self.target_ids = self._map_sequences_to_ids(
+            targets_as_tokens, lang_obj.word2id
+        )
 
         # Ensure source and target lists have the same length after OOV filtering
         min_len = min(len(self.source_ids), len(self.target_ids))
         self.source_ids = self.source_ids[:min_len]
         self.target_ids = self.target_ids[:min_len]
 
-
-    def _map_sequences_to_ids(self, sequences_of_tokens: list[list[str]], word2id_dict: dict[str, int]) -> list[list[int]]:
+    def _map_sequences_to_ids(
+        self, sequences_of_tokens: list[list[str]], word2id_dict: dict[str, int]
+    ) -> list[list[int]]:
         """
         Helper method to convert lists of token sequences to lists of ID sequences.
         Handles Out-Of-Vocabulary (OOV) words.
         """
         id_sequences = []
-        unk_token_id = word2id_dict.get("<unk>") # Get ID for <unk> token, if it exists
+        unk_token_id = word2id_dict.get("<unk>")  # Get ID for <unk> token, if it exists
 
         for token_sequence in sequences_of_tokens:
             current_ids = []
             valid_sequence = True
             for token in token_sequence:
                 token_id = word2id_dict.get(token, unk_token_id)
-                if token_id is None: # OOV and no <unk> token defined
-                    print(f"Warning: OOV token '{token}' found and no '<unk>' token in vocabulary. Skipping sequence: '{' '.join(token_sequence)}'")
+                if token_id is None:  # OOV and no <unk> token defined
+                    print(
+                        f"Warning: OOV token '{token}' found and no '<unk>' token in vocabulary. Skipping sequence: '{' '.join(token_sequence)}'"
+                    )
                     valid_sequence = False
                     break
                 current_ids.append(token_id)
@@ -131,12 +148,11 @@ class PennTreeBank(data.Dataset):
         target_tensor = torch.LongTensor(self.target_ids[idx])
         return {"source": source_tensor, "target": target_tensor}
 
+
 # ==============================================================================
 # --- COLLATE FUNCTION for DataLoader ---
 # ==============================================================================
-def collate_fn(batch_samples: list[dict[str, torch.Tensor]],
-               pad_token_id: int,
-               device: torch.device) -> dict[str, torch.Tensor | int]:
+def collate_fn(batch_data, pad_token_id, device):
     """
     Processes a list of samples to form a batch.
     Sorts by source length, pads sequences, moves to device, and calculates total non-pad tokens.
@@ -152,16 +168,16 @@ def collate_fn(batch_samples: list[dict[str, torch.Tensor]],
               and 'number_tokens' (total non-pad tokens in the batch).
     """
     # Sort batch by source sequence length in descending order (common for RNNs)
-    batch_samples.sort(key=lambda x: len(x["source"]), reverse=True)
+    batch_data.sort(key=lambda x: len(x["source"]), reverse=True)
 
     # Separate source and target tensors from the batch
-    source_tensors = [sample['source'] for sample in batch_samples]
-    target_tensors = [sample['target'] for sample in batch_samples]
+    source_tensors = [sample["source"] for sample in batch_data]
+    target_tensors = [sample["target"] for sample in batch_data]
 
     # Helper function to pad a list of sequences (1D tensors)
     def _pad_sequences(sequences: list[torch.Tensor]) -> tuple[torch.Tensor, list[int]]:
         lengths = [len(seq) for seq in sequences]
-        max_len = max(lengths) if lengths else 0 # Handle empty sequences list
+        max_len = max(lengths) if lengths else 0  # Handle empty sequences list
 
         # Create a tensor filled with pad_token_id
         padded_tensor = torch.LongTensor(len(sequences), max_len).fill_(pad_token_id)
@@ -169,7 +185,7 @@ def collate_fn(batch_samples: list[dict[str, torch.Tensor]],
         # Copy each sequence into the padded tensor
         for i, seq in enumerate(sequences):
             end_idx = lengths[i]
-            padded_tensor[i, :end_idx] = seq[:end_idx] # Ensure correct slicing
+            padded_tensor[i, :end_idx] = seq[:end_idx]  # Ensure correct slicing
         return padded_tensor, lengths
 
     # Pad source and target sequences
@@ -179,8 +195,10 @@ def collate_fn(batch_samples: list[dict[str, torch.Tensor]],
 
     # Prepare the collated batch dictionary
     collated_batch = {
-        'source': padded_sources.to(device),
-        'target': padded_targets.to(device),
-        'number_tokens': sum(target_lengths) # Sum of actual (non-padded) token lengths
+        "source": padded_sources.to(device),
+        "target": padded_targets.to(device),
+        "number_tokens": sum(
+            target_lengths
+        ),  # Sum of actual (non-padded) token lengths
     }
     return collated_batch

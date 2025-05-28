@@ -1,186 +1,186 @@
-# --- START OF FILE main_lstm_best_notebook_style.py ---
-# This script executes a single run of the best LSTM configuration for ATIS
-# (Bidirectional + Dropout: DR=0.5, LR=0.005, BS=128).
-# The main execution block is styled to resemble the original
-# '05_intent_and_slot_filling.py' notebook, while relying on
-# imported classes and functions from utils.py, model.py, and functions.py.
-
 import os
 from tqdm import tqdm
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import classification_report 
-from collections import Counter 
-from tabulate import tabulate 
-import copy 
-from sklearn.model_selection import train_test_split
-from utils import device, PAD_TOKEN, Lang, IntentsAndSlots, collate_fn, load_data, train_test_split
+from collections import Counter
+from tabulate import tabulate
+import copy
+from utils import (
+    device,
+    PAD_TOKEN,
+    Lang,
+    IntentsAndSlots,
+    collate_fn,
+    load_data,
+    train_test_split,
+)
 from model import ModelIAS
 from functions import init_weights, train_loop, eval_loop
-from conll import evaluate 
-from pprint import pprint
 
-# ==============================================================================
-# --- MAIN EXECUTION BLOCK  ---
-# ==============================================================================
 if __name__ == "__main__":
+    HID_SIZE = 200
+    EMB_SIZE = 300
+    LR = 0.005
+    CLIP = 5.0
+    N_EPOCHS = 50
+    PATIENCE = 10
+    IS_BIDIRECTIONAL = True
+    DROPOUT_RATE = 0.5
+    BATCH_SIZE_TRAIN = 128
 
-    hid_size = 200
-    emb_size = 300
-    lr = 0.005
-    clip = 5.0
-    n_epochs = 50       
-    patience = 10       
-    
-    is_bidirectional_model = True
-    dropout_rate_model = 0.5
-    batch_size_model_train = 128 
-    
-    config_name_run = f"LSTM_Best_DR{dropout_rate_model}_LR{lr}_BS{batch_size_model_train}"
-    print(f"\n--- Running Configuration: {config_name_run} ---")
-    print(f"Device: {device}") # Print device used
+    config_name = f"LSTM_Best_DR{DROPOUT_RATE}_LR{LR}_BS{BATCH_SIZE_TRAIN}"
+    print(f"\n--- Running: {config_name} (Device: {device}) ---")
 
-    # --- Data Loading and Preprocessing  --- 
-    tmp_train_raw = load_data(os.path.join('dataset','ATIS','train.json'))
-    test_raw = load_data(os.path.join('dataset','ATIS','test.json'))
+    # --- Data Loading and Preprocessing ---
+    data_dir = os.environ.get("ATIS_DATA_DIR", os.path.join("dataset", "ATIS"))
+    if not os.path.exists(os.path.join(data_dir, "train.json")):
+        print(f"CRITICAL ERROR: Dataset not found at {data_dir}.")
+        exit()
+    tmp_train_raw = load_data(os.path.join(data_dir, "train.json"))
+    test_raw = load_data(os.path.join(data_dir, "test.json"))
 
-    # Create dev set 
-    portion = 0.10
-
-    intents = [x['intent'] for x in tmp_train_raw] # We stratify on intents
-    count_y = Counter(intents)
-
-    labels = []
-    inputs = []
-    mini_train = []
-
-    for id_y, y in enumerate(intents):
-        if count_y[y] > 1: # If some intents occurs only once, we put them in training
-            inputs.append(tmp_train_raw[id_y])
-            labels.append(y)
+    dev_portion = 0.10
+    intents_full = [x["intent"] for x in tmp_train_raw]
+    intent_counts = Counter(intents_full)
+    strat_inputs, strat_labels, single_instance = [], [], []
+    for i, intent_val in enumerate(intents_full):
+        if intent_counts[intent_val] > 1:
+            strat_inputs.append(tmp_train_raw[i])
+            strat_labels.append(intent_val)
         else:
-            mini_train.append(tmp_train_raw[id_y])
-    # Random Stratify
-    X_train, X_dev, y_train, y_dev = train_test_split(inputs, labels, test_size=portion, 
-                                                        random_state=42, 
-                                                        shuffle=True,
-                                                        stratify=labels)
-    X_train.extend(mini_train)
-    train_raw = X_train
-    dev_raw = X_dev
+            single_instance.append(tmp_train_raw[i])
 
-    y_test = [x['intent'] for x in test_raw]
+    # Assuming stratification is always possible for ATIS or a simple split is acceptable
+    if len(strat_inputs) > 1 and len(set(strat_labels)) > 1:
+        train_s, dev_s, _, _ = train_test_split(
+            strat_inputs,
+            strat_labels,
+            test_size=dev_portion,
+            random_state=42,
+            shuffle=True,
+            stratify=strat_labels,
+        )
+        train_raw = train_s + single_instance
+        dev_raw = dev_s
+    else:  # Fallback for very small/uniform datasets (less likely for ATIS)
+        train_raw, dev_raw = train_test_split(
+            tmp_train_raw, test_size=dev_portion, random_state=42, shuffle=True
+        )
+        if not dev_raw:  # If dev_raw is still empty, this is problematic
+            print(
+                "Warning: Development set could not be created effectively. Results might be unreliable."
+            )
+            dev_raw = test_raw[
+                : max(1, int(len(test_raw) * 0.1))
+            ]  # Create a tiny dev from test as last resort - not ideal
 
-    # Intent distributions
-    print('Train:')
-    pprint({k:round(v/len(y_train),3)*100 for k, v in sorted(Counter(y_train).items())})
-    print('Dev:'), 
-    pprint({k:round(v/len(y_dev),3)*100 for k, v in sorted(Counter(y_dev).items())})
-    print('Test:') 
-    pprint({k:round(v/len(y_test),3)*100 for k, v in sorted(Counter(y_test).items())})
-    print('='*89)
-    # Dataset size
-    print('TRAIN size:', len(train_raw))
-    print('DEV size:', len(dev_raw))
-    print('TEST size:', len(test_raw))
-    
-    # Create Lang object 
-    words = sum([x['utterance'].split() for x in train_raw], []) # No set() since we want to compute the cutoff
-    corpus = train_raw + dev_raw + test_raw # We do not want unk labels, however this depends on the research purpose
-    slots = set(sum([line['slots'].split() for line in corpus],[]))
-    intents = set([line['intent'] for line in corpus])
-    lang = Lang(words, intents, slots, cutoff=0)
+    words_vocab = sum([x["utterance"].split() for x in train_raw], [])
+    corpus_labels = train_raw + dev_raw + test_raw  # dev_raw is now assumed to exist
+    slots_vocab = set(sum([line["slots"].split() for line in corpus_labels], []))
+    intents_vocab = set([line["intent"] for line in corpus_labels])
+    lang = Lang(words_vocab, intents_vocab, slots_vocab, cutoff=0)
 
-    # Create Datasets (as in notebook)
     train_dataset = IntentsAndSlots(train_raw, lang)
-    dev_dataset = IntentsAndSlots(dev_raw, lang) if dev_raw else None
+    dev_dataset = IntentsAndSlots(dev_raw, lang)  # dev_dataset is assumed to exist
     test_dataset = IntentsAndSlots(test_raw, lang)
-    print("Data preparation and Dataset creation finished.")
 
-    # DataLoaders 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_model_train, collate_fn=collate_fn, shuffle=True)
-    dev_loader = DataLoader(dev_dataset, batch_size=64, collate_fn=collate_fn) if dev_dataset else None
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE_TRAIN, collate_fn=collate_fn, shuffle=True
+    )
+    dev_loader = DataLoader(
+        dev_dataset, batch_size=64, collate_fn=collate_fn
+    )  # Eval batch size
     test_loader = DataLoader(test_dataset, batch_size=64, collate_fn=collate_fn)
 
-    # --- Model, Optimizer, Loss ---
-    print("Initializing Model, Optimizer, and Loss criteria...")
-    out_slot_size = len(lang.slot2id)
-    out_int_size = len(lang.intent2id)
-    vocab_len_size = len(lang.word2id)
+    # --- Training (Multiple Runs) ---
+    num_runs = 5
+    all_slot_f1s, all_intent_accs = [], []
 
-    model = ModelIAS( 
-        hidden_size=hid_size, 
-        num_slot_classes=out_slot_size,  
-        num_intent_classes=out_int_size, 
-        embedding_size=emb_size,   
-        vocab_size=vocab_len_size,     
-        pad_token_idx=PAD_TOKEN,
-        is_bidirectional=is_bidirectional_model,
-        dropout_p=dropout_rate_model
-    ).to(device)
-    model.apply(init_weights) 
-
-    optimizer = optim.Adam(model.parameters(), lr=lr) 
-    criterion_slots = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN) 
-    criterion_intents = nn.CrossEntropyLoss() 
-    print("Initialization complete.")
-
-    # --- Training Loop ---
-    runs = 5
-    slot_f1s, intent_acc = [], []
-    
-    for x in tqdm(range(0, runs)):
-        model = ModelIAS(hid_size, out_slot_size, out_int_size, emb_size, 
-                        vocab_len_size, pad_index=PAD_TOKEN).to(device)
+    for run_idx in tqdm(range(num_runs), desc="Total Runs"):
+        tqdm.write(f"\n--- Run {run_idx + 1}/{num_runs} ---")
+        model = ModelIAS(
+            hidden_size=HID_SIZE,
+            num_slot_classes=len(lang.slot2id),
+            num_intent_classes=len(lang.intent2id),
+            embedding_size=EMB_SIZE,
+            vocab_size=len(lang.word2id),
+            pad_token_idx=PAD_TOKEN,
+            is_bidirectional=IS_BIDIRECTIONAL,
+            dropout_p=DROPOUT_RATE,
+        ).to(device)
         model.apply(init_weights)
-
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        optimizer = optim.Adam(model.parameters(), lr=LR)
         criterion_slots = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
         criterion_intents = nn.CrossEntropyLoss()
 
-        patience_counter = patience
-        best_f1 = 0
-        best_model_state = None
+        current_patience = PATIENCE
+        best_f1_run = 0.0
+        best_model_state_run = copy.deepcopy(model.state_dict())
 
-        for epoch in range(1, n_epochs + 1):
-            loss = train_loop(train_loader, optimizer, criterion_slots, 
-                            criterion_intents, model)
-            
-            if epoch % 5 == 0:
-                results_dev, intent_res, loss_dev = eval_loop(dev_loader, criterion_slots, 
-                                                            criterion_intents, model, lang)
-                f1 = results_dev['total']['f']
+        epoch_pbar = tqdm(
+            range(1, N_EPOCHS + 1), desc=f"Run {run_idx + 1} Epochs", leave=False
+        )
+        for epoch_num in epoch_pbar:
+            train_losses = train_loop(
+                train_loader, optimizer, criterion_slots, criterion_intents, model, CLIP
+            )
+            avg_train_loss = np.mean(train_losses) if train_losses else float("inf")
 
-                if f1 > best_f1:
-                    best_f1 = f1
-                    best_model_state = copy.deepcopy(model.state_dict())
-                    patience_counter = patience
-                else:
-                    patience_counter -= 1
-                    
-                if patience_counter <= 0:  # Early stopping
-                    break
+            dev_slots_res, dev_intent_rep, dev_avg_loss = eval_loop(
+                dev_loader, criterion_slots, criterion_intents, model, lang
+            )
+            dev_f1 = dev_slots_res.get("total", {}).get("f", 0.0)
+            dev_acc = dev_intent_rep.get("accuracy", 0.0)
 
-        # Load best model and evaluate on test set
-        if best_model_state:
-            model.load_state_dict(best_model_state)
-            results_test, intent_test, _ = eval_loop(test_loader, criterion_slots, 
-                                                   criterion_intents, model, lang)
-            intent_acc.append(intent_test['accuracy'])
-            slot_f1s.append(results_test['total']['f'])
+            epoch_pbar.set_postfix(
+                {
+                    "TrainLoss": f"{avg_train_loss:.4f}",
+                    "DevLoss": f"{dev_avg_loss:.4f}",
+                    "DevF1": f"{dev_f1:.4f}",
+                    "DevAcc": f"{dev_acc:.4f}",
+                }
+            )
+            if dev_f1 > best_f1_run:
+                best_f1_run = dev_f1
+                best_model_state_run = copy.deepcopy(model.state_dict())
+                current_patience = PATIENCE
+            else:
+                current_patience -= 1
+            if current_patience <= 0:
+                tqdm.write(f"Run {run_idx + 1}: Early stopping epoch {epoch_num}.")
+                break
+        epoch_pbar.close()
 
-    # Calculate and print final results
-    slot_f1s = np.asarray(slot_f1s)
-    intent_acc = np.asarray(intent_acc)
-    
-    print("\n--- FINAL RESULTS ---")
-    results_display_data = [
+        if best_model_state_run:
+            model.load_state_dict(best_model_state_run)
+            test_slots_res, test_intent_rep, _ = eval_loop(
+                test_loader, criterion_slots, criterion_intents, model, lang
+            )
+            all_intent_accs.append(test_intent_rep.get("accuracy", 0.0))
+            all_slot_f1s.append(test_slots_res.get("total", {}).get("f", 0.0))
+        else:
+            all_intent_accs.append(0.0)
+            all_slot_f1s.append(0.0)
+
+    # --- Final Results ---
+    final_slot_f1s_np = np.asarray(all_slot_f1s)
+    final_intent_accs_np = np.asarray(all_intent_accs)
+
+    print("\n--- FINAL AVG RESULTS (Multiple Runs) ---")
+    results_table_data = [
         ["Metric", "Mean", "Std"],
-        ["Slot F1", f"{slot_f1s.mean():.3f}", f"{slot_f1s.std():.3f}"],
-        ["Intent Accuracy", f"{intent_acc.mean():.3f}", f"{intent_acc.std():.3f}"]
+        [
+            "Slot F1",
+            f"{final_slot_f1s_np.mean():.4f}",
+            f"{final_slot_f1s_np.std():.4f}",
+        ],
+        [
+            "Intent Accuracy",
+            f"{final_intent_accs_np.mean():.4f}",
+            f"{final_intent_accs_np.std():.4f}",
+        ],
     ]
-    print(tabulate(results_display_data, headers="firstrow", tablefmt="grid"))
-    print(f"\n--- Script Finished: {config_name_run} ---")
+    print(tabulate(results_table_data, headers="firstrow", tablefmt="grid"))
+    print(f"\n--- Script Finished: {config_name} ---")

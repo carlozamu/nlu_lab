@@ -1,17 +1,19 @@
-
-import torch
 import torch.nn as nn
 from transformers import BertModel
 
-# ==============================================================================
-# --- BERT-based Model for Joint Intent Classification and Slot Filling ---
-# ==============================================================================
 
 class JointBERTModel(nn.Module):
     """
     BERT-based model for joint Intent Classification and Slot Filling.
     """
-    def __init__(self, num_intent_labels, num_slot_labels, bert_model_name='bert-base-uncased', dropout_rate=0.1):
+
+    def __init__(
+        self,
+        num_intent_labels,
+        num_slot_labels,
+        bert_model_name="bert-base-uncased",
+        dropout_rate=0.1,
+    ):
         """
         Args:
             num_intent_labels (int): Number of intent classes.
@@ -40,16 +42,16 @@ class JointBERTModel(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            return_dict=False # Returns tuple: (last_hidden_state, pooler_output, ...)
+            return_dict=False,
         )
 
-        last_hidden_state = outputs[0] # (batch_size, seq_len, bert_hidden_size)
-        
+        last_hidden_state = outputs[0]
+
         # Intent classification using [CLS] token representation
         cls_token_output = last_hidden_state[:, 0, :]
         intent_logits = self.intent_classifier(self.dropout(cls_token_output))
 
         # Slot filling using all token representations
         slot_logits = self.slot_classifier(self.dropout(last_hidden_state))
-        
+
         return intent_logits, slot_logits

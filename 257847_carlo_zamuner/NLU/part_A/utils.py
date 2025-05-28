@@ -1,16 +1,18 @@
-
 import json
 import os
+
 # import random # Not used directly in this version
 from collections import Counter
 # from pprint import pprint # Not used directly in this version
 
 import numpy as np
 import torch
-import torch.nn as nn # Used in init_weights
+import torch.nn as nn  # Used in init_weights
 import torch.utils.data as data
-from sklearn.model_selection import train_test_split # Imported but seems unused in this file directly,
-                                                     # might be used by main.py that imports * from utils
+from sklearn.model_selection import (
+    train_test_split,
+)  # Imported but seems unused in this file directly,
+# might be used by main.py that imports * from utils
 
 # ==============================================================================
 # --- Global Variables and Device Configuration ---
@@ -20,7 +22,7 @@ from sklearn.model_selection import train_test_split # Imported but seems unused
 if torch.backends.mps.is_available():
     device = torch.device("mps")
 elif torch.cuda.is_available():
-    device = torch.device("cuda:0") # Use the first available GPU
+    device = torch.device("cuda:0")  # Use the first available GPU
 else:
     device = torch.device("cpu")
 
@@ -36,6 +38,7 @@ PAD_TOKEN = 0
 # ==============================================================================
 # --- Data Loading Function ---
 # ==============================================================================
+
 
 def load_data(path):
     """
@@ -59,16 +62,19 @@ def load_data(path):
         exit()
     return dataset
 
+
 # ==============================================================================
 # --- Lang Class (Vocabulary Management for Words, Intents, Slots) ---
 # ==============================================================================
+
 
 class Lang:
     """
     Helper class to manage mappings between words/labels and numerical indices.
     Used for LSTM model's vocabulary and label encoding.
     """
-    def __init__(self, words_for_vocab, intent_labels, slot_labels, cutoff_freq=0):
+
+    def __init__(self, words_for_vocab, intent_labels, slot_labels, cutoff=0):
         """
         Initializes word2id, slot2id, intent2id dictionaries and their inverses.
         Args:
@@ -77,46 +83,51 @@ class Lang:
             slot_labels (set): Set of all unique slot labels.
             cutoff_freq (int): Minimum frequency for a word to be included in the vocabulary.
         """
-        self.word2id = self._build_word_vocab(words_for_vocab, cutoff_freq, add_unk=True)
+        self.word2id = self._build_word_vocab(words_for_vocab, cutoff, add_unk=True)
         self.slot2id = self._build_label_vocab(slot_labels, add_pad=True)
-        self.intent2id = self._build_label_vocab(intent_labels, add_pad=False) # Intents typically don't need padding
+        self.intent2id = self._build_label_vocab(
+            intent_labels, add_pad=False
+        )  # Intents typically don't need padding
 
         self.id2word = {idx: word for word, idx in self.word2id.items()}
         self.id2slot = {idx: slot for slot, idx in self.slot2id.items()}
         self.id2intent = {idx: intent for intent, idx in self.intent2id.items()}
 
-    def _build_word_vocab(self, word_list, cutoff_freq, add_unk=True):
+    def _build_word_vocab(self, word_list, cutoff, add_unk=True):
         """Builds the word -> id dictionary."""
         vocab = {"pad": PAD_TOKEN}
         if add_unk:
-            vocab["unk"] = len(vocab) # 'unk' token for out-of-vocabulary words
-        
+            vocab["unk"] = len(vocab)  # 'unk' token for out-of-vocabulary words
+
         word_counts = Counter(word_list)
         for word, count in word_counts.items():
-            if count > cutoff_freq:
+            if count > cutoff:
                 vocab[word] = len(vocab)
         return vocab
 
     def _build_label_vocab(self, labels, add_pad=True):
         """Builds the label -> id dictionary (for slots and intents)."""
         vocab = {}
-        if add_pad: # Padding is typically needed for slot sequences
+        if add_pad:  # Padding is typically needed for slot sequences
             vocab["pad"] = PAD_TOKEN
-        
+
         # Sort elements to ensure consistent mapping across runs
         for label in sorted(list(labels)):
             vocab[label] = len(vocab)
         return vocab
 
+
 # ==============================================================================
 # --- PyTorch Dataset Class (IntentsAndSlots for LSTM) ---
 # ==============================================================================
+
 
 class IntentsAndSlots(data.Dataset):
     """
     Custom PyTorch Dataset for handling the ATIS dataset for the LSTM model.
     Converts text and labels into sequences of numerical indices.
     """
+
     def __init__(self, raw_dataset_items, lang_obj, unk_token_str="unk"):
         """
         Args:
@@ -131,13 +142,21 @@ class IntentsAndSlots(data.Dataset):
 
         for item in raw_dataset_items:
             self.utterances_str.append(item["utterance"])
-            self.slots_str_sequences.append(item["slots"]) # Slots are space-separated strings
+            self.slots_str_sequences.append(
+                item["slots"]
+            )  # Slots are space-separated strings
             self.intents_str.append(item["intent"])
 
         # Convert text sequences to ID sequences using the Lang object
-        self.utterance_ids_list = self._map_sequences_to_ids(self.utterances_str, lang_obj.word2id)
-        self.slot_ids_list = self._map_sequences_to_ids(self.slots_str_sequences, lang_obj.slot2id)
-        self.intent_ids_list = self._map_labels_to_ids(self.intents_str, lang_obj.intent2id)
+        self.utterance_ids_list = self._map_sequences_to_ids(
+            self.utterances_str, lang_obj.word2id
+        )
+        self.slot_ids_list = self._map_sequences_to_ids(
+            self.slots_str_sequences, lang_obj.slot2id
+        )
+        self.intent_ids_list = self._map_labels_to_ids(
+            self.intents_str, lang_obj.intent2id
+        )
 
     def __len__(self):
         """Returns the total number of samples in the dataset."""
@@ -155,9 +174,13 @@ class IntentsAndSlots(data.Dataset):
         # Convert ID lists to LongTensors for PyTorch model consumption
         utterance_tensor = torch.LongTensor(self.utterance_ids_list[idx])
         slots_tensor = torch.LongTensor(self.slot_ids_list[idx])
-        intent_id = self.intent_ids_list[idx] # Intent is a single ID
+        intent_id = self.intent_ids_list[idx]  # Intent is a single ID
 
-        return {"utterance": utterance_tensor, "slots": slots_tensor, "intent": intent_id}
+        return {
+            "utterance": utterance_tensor,
+            "slots": slots_tensor,
+            "intent": intent_id,
+        }
 
     def _map_labels_to_ids(self, label_data, mapper_dict):
         """Maps a list of labels (e.g., intents) to their numerical IDs."""
@@ -169,15 +192,21 @@ class IntentsAndSlots(data.Dataset):
     def _map_sequences_to_ids(self, text_sequences, mapper_dict):
         """Maps a list of text sequences (utterances, slots) to lists of numerical IDs."""
         id_sequences = []
-        unk_id = mapper_dict.get(self.unk_token, PAD_TOKEN) # Fallback for unknown tokens
+        unk_id = mapper_dict.get(
+            self.unk_token, PAD_TOKEN
+        )  # Fallback for unknown tokens
         for seq_str in text_sequences:
-            token_ids = [mapper_dict.get(token, unk_id) for token in str(seq_str).split()]
+            token_ids = [
+                mapper_dict.get(token, unk_id) for token in str(seq_str).split()
+            ]
             id_sequences.append(token_ids)
         return id_sequences
+
 
 # ==============================================================================
 # --- Collate Function for DataLoader (LSTM) ---
 # ==============================================================================
+
 
 def collate_fn(batch_samples):
     """
@@ -200,7 +229,9 @@ def collate_fn(batch_samples):
 
     # Pad utterance and slot sequences
     utterance_seqs_padded, utterance_lengths = _pad_sequences(batched_data["utterance"])
-    slot_seqs_padded, _ = _pad_sequences(batched_data["slots"]) # Slot lengths match utterance_lengths
+    slot_seqs_padded, _ = _pad_sequences(
+        batched_data["slots"]
+    )  # Slot lengths match utterance_lengths
 
     intent_ids_tensor = torch.LongTensor(batched_data["intent"])
 
@@ -208,14 +239,17 @@ def collate_fn(batch_samples):
     utterance_seqs_padded = utterance_seqs_padded.to(device)
     slot_seqs_padded = slot_seqs_padded.to(device)
     intent_ids_tensor = intent_ids_tensor.to(device)
-    utterance_lengths = utterance_lengths.to(device) # Keep on device as per original for consistency
+    utterance_lengths = utterance_lengths.to(
+        device
+    )  # Keep on device as per original for consistency
 
     return {
-        "utterances": utterance_seqs_padded, # Padded input sequences
-        "intents": intent_ids_tensor,        # Intent labels
-        "y_slots": slot_seqs_padded,         # Padded ground truth slot labels
-        "slots_len": utterance_lengths,      # Original sequence lengths (used for packing, loss, metrics)
+        "utterances": utterance_seqs_padded,  # Padded input sequences
+        "intents": intent_ids_tensor,  # Intent labels
+        "y_slots": slot_seqs_padded,  # Padded ground truth slot labels
+        "slots_len": utterance_lengths,  # Original sequence lengths (used for packing, loss, metrics)
     }
+
 
 def _pad_sequences(sequences_list):
     """
@@ -227,13 +261,12 @@ def _pad_sequences(sequences_list):
     """
     lengths = [len(seq) for seq in sequences_list]
     max_len = max(lengths) if lengths else 0
-    
-    padded_sequences_tensor = torch.LongTensor(len(sequences_list), max_len).fill_(PAD_TOKEN)
+
+    padded_sequences_tensor = torch.LongTensor(len(sequences_list), max_len).fill_(
+        PAD_TOKEN
+    )
     for i, seq_tensor in enumerate(sequences_list):
         end_idx = lengths[i]
         padded_sequences_tensor[i, :end_idx] = seq_tensor[:end_idx]
-        
+
     return padded_sequences_tensor, torch.LongTensor(lengths)
-
-
-
