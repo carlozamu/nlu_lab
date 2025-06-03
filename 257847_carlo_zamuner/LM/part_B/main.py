@@ -5,226 +5,195 @@ from torch.utils.data import DataLoader
 import math
 import copy
 from functools import partial
-
-# os removed as we are not saving files
+import os
 from tqdm import tqdm
 
-# Custom module imports
-try:
-    from functions import train_loop, eval_loop, init_weights
-    from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
-    from model import LM_LSTM_VarDropWT  # Specific model for this run
-except ImportError as e:
-    print(f"Error importing modules: {e}. Ensure they are accessible.")
-    exit()
+from functions import train_loop, eval_loop, init_weights
+from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
+from model import LM_LSTM_VarDropWT  
+
 
 if __name__ == "__main__":
-    # --- Global Settings & Parameters ---
+
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Device: {DEVICE}")
 
-    # Parameters for Part1B_FineTuned_Best configuration
-    run_identifier = "Part1B_FineTuned_Best"
-    learning_rate = 3.75
-    batch_s = 16  # Shortened variable name
-    patience_epochs = 7
-    nt_avg_trigger_epochs = 3  # NT-AvSGD trigger
-    hidden_dim = 300
-    embedding_dim = 300  # Must match hidden_dim for LM_LSTM_VarDropWT
-    grad_clip_norm = 5
-    num_epochs = 100
-    dropout_e_rate = 0.1  # Variational dropout for embedding output
-    dropout_o_rate = 0.4  # Variational dropout for LSTM output
+    experiment_step = "Part1B_Step3"  
+    model_save_dir = "bin"  
 
-    print(f"\n--- Running: {run_identifier} ---")
-    print(
-        f"   LR={learning_rate}, BS={batch_s}, Patience={patience_epochs}, Trigger={nt_avg_trigger_epochs}"
-    )
-    print(f"   Model: {LM_LSTM_VarDropWT.__name__}, Optim: NT-AvSGD(SGD)")
+    
+    lr = 3.75  
+    batch_size = 16
+    hid = 300
+    emb = 300  
+    clip = 5
+    n_epochs = 100
+    patience = 7
+    nt_avsgd_trigger = 3  
+    emb_dropout = 0.1  
+    fc_dropout = 0.4  
 
-    # --- Data Loading and Preparation ---
+
     print("\nLoading data & vocabulary...")
-    train_raw_data = read_file("./dataset/PennTreeBank/ptb.train.txt")
-    dev_raw_data = read_file("./dataset/PennTreeBank/ptb.valid.txt")
-    test_raw_data = read_file("./dataset/PennTreeBank/ptb.test.txt")
-    lang_processor = Lang(train_raw_data, ["<pad>", "<eos>"])  # Renamed for clarity
-    vocabulary_size = len(lang_processor.word2id)
-    pad_idx = lang_processor.word2id["<pad>"]
-    print("Data loaded.")
+    try:
+        train_raw = read_file("./dataset/PennTreeBank/ptb.train.txt")
+        dev_raw = read_file("./dataset/PennTreeBank/ptb.valid.txt")
+        test_raw = read_file("./dataset/PennTreeBank/ptb.test.txt")
+        lang = Lang(train_raw, ["<pad>", "<eos>"])
+        vocab_len = len(lang.word2id)
+        print("Data loaded.")
+    except FileNotFoundError as e:
+        print(f"Error: Dataset not found: {e}")
+        exit()
 
     print("Creating Datasets...")
-    train_dataset = PennTreeBank(train_raw_data, lang_processor)
-    dev_dataset = PennTreeBank(dev_raw_data, lang_processor)
-    test_dataset = PennTreeBank(test_raw_data, lang_processor)
+    train_dataset = PennTreeBank(train_raw, lang)
+    dev_dataset = PennTreeBank(dev_raw, lang)
+    test_dataset = PennTreeBank(test_raw, lang)
     print("Datasets created.")
 
-    # --- DataLoader Creation ---
+
+    print(f"\n--- Running Configuration: {experiment_step} ---")
+    print(f"   LR={lr}, BS={batch_size}, Optim=NT-AvSGD(SGD)")
+    print(f"   Model=LM_LSTM_VarDropWT, Patience={patience}, NT-AvSGD Trigger={nt_avsgd_trigger}")
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_s,
+        batch_size=batch_size,
+        collate_fn=partial(collate_fn, pad_token_id=lang.word2id["<pad>"], device=DEVICE),
         shuffle=True,
-        collate_fn=partial(collate_fn, pad_token_id=pad_idx, device=DEVICE),
-        drop_last=True,
+        drop_last=True
     )
     dev_loader = DataLoader(
         dev_dataset,
-        batch_size=batch_s * 2,
-        collate_fn=partial(collate_fn, pad_token_id=pad_idx, device=DEVICE),
+        batch_size=batch_size * 2,  
+        collate_fn=partial(collate_fn, pad_token_id=lang.word2id["<pad>"], device=DEVICE)
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_s * 2,
-        collate_fn=partial(collate_fn, pad_token_id=pad_idx, device=DEVICE),
+        batch_size=batch_size * 2,  
+        collate_fn=partial(collate_fn, pad_token_id=lang.word2id["<pad>"], device=DEVICE)
     )
 
-    # --- Model, Optimizer, Loss Initialization ---
+
     print("Initializing Model, Optimizer, Loss...")
     model = LM_LSTM_VarDropWT(
-        emb_size=embedding_dim,
-        hidden_size=hidden_dim,
-        output_size=vocabulary_size,
-        pad_index=pad_idx,
-        n_layers=1,  # Assuming 1 layer
-        dropoute=dropout_e_rate,
-        dropouto=dropout_o_rate,
+        emb_size=emb,
+        hidden_size=hid,
+        output_size=vocab_len,
+        pad_index=lang.word2id["<pad>"],
+        n_layers=1,
+        dropoute=emb_dropout,
+        dropouto=fc_dropout
     ).to(DEVICE)
-    model.apply(init_weights)
+    model.apply(init_weights) 
 
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)  # Base SGD for NT-AvSGD
-    criterion_train = nn.CrossEntropyLoss(ignore_index=pad_idx)
-    criterion_eval = nn.CrossEntropyLoss(ignore_index=pad_idx, reduction="sum")
+    optimizer = optim.SGD(model.parameters(), lr=lr)
+    criterion_train = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"])
+    criterion_eval = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"], reduction='sum')
 
-    # --- Training Loop ---
     print("Starting Training...")
-    current_patience = patience_epochs
-    avg_trigger_countdown = nt_avg_trigger_epochs
-    is_averaging_active = False  # Flag for NT-AvSGD state
-    averaged_model_state = None  # Stores state_dict if averaging
-    avg_update_steps = 0
-    averaging_triggered_at_epoch = -1
-    best_dev_perplexity = math.inf
-    best_ppl_for_nt_trigger = math.inf  # Tracks PPL for NT trigger logic
+    patience_counter = patience
+    trigger_counter = nt_avsgd_trigger
+    best_ppl = math.inf
+    best_model = None
 
-    pbar = tqdm(range(1, num_epochs + 1), desc=f"Epoch ({run_identifier})", leave=False)
-    for epoch_num in pbar:  # Renamed for clarity
-        model.train()
-        train_epoch_loss = train_loop(  # Renamed for clarity
-            train_loader, optimizer, criterion_train, model, clip_value=grad_clip_norm
-        )
+    averaging_active = False
+    averaged_params = None
+    steps_since_averaging = 0
+    trigger_best_ppl = math.inf
+    
+    sampled_epochs = []
+    losses_train = []
+    losses_dev = []
 
-        # NT-AvSGD: Averaging step if active
-        if is_averaging_active and averaged_model_state is not None:
-            avg_update_steps += 1
-            # Temporarily create model instance to update averaged weights
-            temp_avg_model_instance = LM_LSTM_VarDropWT(
-                emb_size=embedding_dim,
-                hidden_size=hidden_dim,
-                output_size=vocabulary_size,
-                pad_index=pad_idx,
-                n_layers=1,
-                dropoute=dropout_e_rate,
-                dropouto=dropout_o_rate,
-            ).to("cpu")  # Perform averaging on CPU to save GPU memory
-            temp_avg_model_instance.load_state_dict(averaged_model_state)
-
-            with torch.no_grad():
-                for avg_p, current_p in zip(
-                    temp_avg_model_instance.parameters(), model.parameters()
-                ):
-                    avg_p.data.add_(
-                        current_p.data.to(avg_p.device) - avg_p.data,
-                        alpha=1.0 / avg_update_steps,
-                    )
-            averaged_model_state = (
-                temp_avg_model_instance.state_dict()
-            )  # Store updated state
-
-        # Evaluation
-        model_for_eval = model  # Default to current model
-        if is_averaging_active and averaged_model_state is not None:
-            # If averaging, evaluate the averaged model
-            eval_averaged_model = LM_LSTM_VarDropWT(
-                emb_size=embedding_dim,
-                hidden_size=hidden_dim,
-                output_size=vocabulary_size,
-                pad_index=pad_idx,
-                n_layers=1,
-                dropoute=dropout_e_rate,
-                dropouto=dropout_o_rate,
-            ).to(DEVICE)
-            eval_averaged_model.load_state_dict(averaged_model_state)
-            eval_averaged_model.eval()
-            model_for_eval = eval_averaged_model
-        else:
-            model.eval()
-
-        current_dev_ppl, _ = eval_loop(dev_loader, criterion_eval, model_for_eval)
-        pbar.set_description(
-            f"Epoch {epoch_num}/{num_epochs} -> Dev PPL: {current_dev_ppl:.3f}"
-        )
-
-        # NT-AvSGD: Trigger logic
-        if not is_averaging_active:
-            if current_dev_ppl < best_ppl_for_nt_trigger:
-                best_ppl_for_nt_trigger = current_dev_ppl
-                avg_trigger_countdown = nt_avg_trigger_epochs
+    pbar = tqdm(range(1, n_epochs + 1))
+    for epoch in pbar:
+        loss = train_loop(train_loader, optimizer, criterion_train, model, clip)
+ 
+        if averaging_active:
+            steps_since_averaging += 1
+            if averaged_params is None:
+    
+                averaged_params = {}
+                for name, param in model.named_parameters():
+                    averaged_params[name] = param.data.clone()
             else:
-                avg_trigger_countdown -= 1
-                if avg_trigger_countdown <= 0:
-                    print(
-                        f"\n   NT-AvSGD Triggered at Epoch {epoch_num}! Starting averaging."
-                    )
-                    is_averaging_active = True
-                    averaging_triggered_at_epoch = epoch_num
-                    averaged_model_state = copy.deepcopy(
-                        model.state_dict()
-                    )  # Start averaging from current model state
-                    avg_update_steps = 1
+        
+                for name, param in model.named_parameters():
+                    averaged_params[name] = averaged_params[name] + \
+                        (param.data - averaged_params[name]) / steps_since_averaging
+        
+        if epoch % 1 == 0:
+            sampled_epochs.append(epoch)
+            losses_train.append(loss)
+            
 
-        # Early Stopping & Tracking Best Perplexity
-        if current_dev_ppl < best_dev_perplexity:
-            best_dev_perplexity = current_dev_ppl
-            current_patience = patience_epochs  # Reset patience
-        else:
-            current_patience -= 1
-            if current_patience <= 0:
-                print(f"\n   Early stopping at epoch {epoch_num}.")
+            if averaging_active and averaged_params is not None:
+
+                saved_params = {}
+                for name, param in model.named_parameters():
+                    saved_params[name] = param.data.clone()
+                
+                for name, param in model.named_parameters():
+                    param.data = averaged_params[name].to(DEVICE)
+                
+                ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
+                
+
+                for name, param in model.named_parameters():
+                    param.data = saved_params[name]
+            else:
+                ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
+            
+            losses_dev.append(loss_dev)
+            pbar.set_description("PPL: %f" % ppl_dev)
+            
+
+            if not averaging_active:
+                if ppl_dev < trigger_best_ppl:
+                    trigger_best_ppl = ppl_dev
+                    trigger_counter = nt_avsgd_trigger
+                else:
+                    trigger_counter -= 1
+                    if trigger_counter <= 0:
+                        print(f"\nNT-AvSGD triggered at epoch {epoch}!")
+                        averaging_active = True
+                        steps_since_averaging = 0
+            
+
+            if ppl_dev < best_ppl:
+                best_ppl = ppl_dev
+                if averaging_active and averaged_params is not None:
+                    best_model = copy.deepcopy(model).to('cpu')
+                    for name, param in best_model.named_parameters():
+                        param.data = averaged_params[name].to('cpu')
+                else:
+                    best_model = copy.deepcopy(model).to('cpu')
+                patience_counter = patience
+            else:
+                patience_counter -= 1
+                
+            if patience_counter <= 0:
+                print(f"\nEarly stopping at epoch {epoch}.")
                 break
-    pbar.close()
-    print("--- Training Finished ---")
 
-    # --- Final Evaluation (print only) ---
-    print("\nEvaluating final model state on Test Set...")
-    final_model_for_test_run = (
-        model  # Default to the last state of the primary trained model
-    )
-    if is_averaging_active and averaged_model_state is not None:
-        # If averaging was active, use the final averaged model state for the test run
-        final_model_for_test_run = LM_LSTM_VarDropWT(
-            emb_size=embedding_dim,
-            hidden_size=hidden_dim,
-            output_size=vocabulary_size,
-            pad_index=pad_idx,
-            n_layers=1,
-            dropoute=dropout_e_rate,
-            dropouto=dropout_o_rate,
-        ).to(DEVICE)
-        final_model_for_test_run.load_state_dict(averaged_model_state)
+    if best_model is not None:
+        best_model.to(DEVICE)
+        final_ppl, _ = eval_loop(test_loader, criterion_eval, best_model)
+        print('Test ppl: ', final_ppl)
 
-    final_model_for_test_run.eval()
-    with torch.no_grad():
-        final_test_perplexity, _ = eval_loop(
-            test_loader, criterion_eval, final_model_for_test_run
-        )
+        # Save the best model
+        #print("\nSaving best model...")
+        #os.makedirs(model_save_dir, exist_ok=True)
+        #model_filename = f"{experiment_step}_lr{lr}_bs{batch_size}.pt"
+        #model_save_path = os.path.join(model_save_dir, model_filename)
+        #try:
+            #torch.save(best_model.state_dict(), model_save_path)
+            #print(f"Model saved to: {model_save_path}")
+        #except Exception as e:
+            #print(f"Error saving model: {e}")
+    else:
+        print("\nNo best model found.")
 
-    print(f"\n--- Final Results for {run_identifier} ---")
-    print(f"   Best Development PPL during training: {best_dev_perplexity:.4f}")
-    print(f"   Final Test PPL: {final_test_perplexity:.4f}")
-    trigger_status_message = (
-        f"Yes (Epoch {averaging_triggered_at_epoch})"
-        if averaging_triggered_at_epoch != -1
-        else "No"
-    )
-    print(f"   Averaging Triggered: {trigger_status_message}")
-
-    print(f"\n--- Script {run_identifier} Finished (Model Not Saved) ---")
+    print(f"\n--- Script {experiment_step} Finished ---")

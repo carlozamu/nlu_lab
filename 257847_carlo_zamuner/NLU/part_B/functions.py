@@ -6,7 +6,7 @@ from conll import evaluate
 
 
 def init_weights_rnn(model_module):
-    """Initializes weights of RNN and Linear layers."""
+    
     for module in model_module.modules():
         if isinstance(module, (nn.GRU, nn.LSTM, nn.RNN)):
             for name, param in module.named_parameters():  # type: ignore
@@ -23,9 +23,9 @@ def init_weights_rnn(model_module):
 
 
 def train_loop_bert(
-    data_loader, optimizer, criterion_slots, criterion_intents, model, grad_clip=1.0
+    data_loader, optimizer, criterion_slots, criterion_intents, model, clip=1.0
 ):
-    """Executes one training epoch for the BERT model."""
+    
     model.train()
     total_epoch_loss = 0.0
     for batch in tqdm(data_loader, desc="Training BERT", leave=False, unit="batch"):
@@ -40,15 +40,15 @@ def train_loop_bert(
         current_loss = loss_intent + loss_slot
         total_epoch_loss += current_loss.item()
         current_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
     return total_epoch_loss / len(data_loader) if data_loader else float("inf")
 
 
 def eval_loop_bert(
     data_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer_obj=None
-):  # tokenizer_obj can be passed if needed by eval logic
-    """Performs evaluation for the BERT model, handling slot alignment."""
+):  
+    
     model.eval()
     total_epoch_loss = 0.0
     all_ref_intents, all_hyp_intents = [], []

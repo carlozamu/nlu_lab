@@ -27,7 +27,7 @@ if __name__ == "__main__":
     BATCH_SIZE_EVAL = 128
     MAX_EPOCHS = 50
     EARLY_STOP_PATIENCE = 10
-    GRAD_CLIP = 1.0
+    CLIP = 1.0
     MAX_SEQ_LENGTH = 50
 
     config_name = f"BERT_Best_{BERT_MODEL_NAME.split('/')[-1]}_DR{DROPOUT_RATE}_LR{LEARNING_RATE}_BS{BATCH_SIZE_TRAIN}"
@@ -136,7 +136,7 @@ if __name__ == "__main__":
                 criterion_slots,
                 criterion_intents,
                 model,
-                GRAD_CLIP,
+                CLIP,
             )
         best_model_state = copy.deepcopy(model.state_dict())  # Save last model state
     else:
@@ -152,7 +152,7 @@ if __name__ == "__main__":
                 criterion_slots,
                 criterion_intents,
                 model,
-                GRAD_CLIP,
+                CLIP,
             )
             dev_f1, dev_acc, dev_loss = eval_loop_bert(
                 dev_loader, criterion_slots, criterion_intents, model, lang, tokenizer

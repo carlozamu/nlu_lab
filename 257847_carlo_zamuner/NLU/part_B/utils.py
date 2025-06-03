@@ -15,12 +15,12 @@ else:
 if device.type == "cuda":
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-PAD_TOKEN_ID = 0
+PAD_TOKEN = 0
 IGNORE_INDEX = -100
 
 
 def load_data(path):
-    """Loads a dataset from a JSON file."""
+    
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.loads(f.read())
@@ -33,11 +33,11 @@ def load_data(path):
 
 
 class Lang:
-    """Manages mappings for intent/slot labels to numerical IDs for BERT."""
+    
 
     def __init__(self, intent_labels_set, slot_labels_set):
         self.slot2id = self._build_label_vocab(
-            slot_labels_set, add_pad=True, pad_id_val=PAD_TOKEN_ID
+            slot_labels_set, add_pad=True, pad_id_val=PAD_TOKEN
         )
         self.intent2id = self._build_label_vocab(intent_labels_set, add_pad=False)
         self.id2slot = {idx: slot for slot, idx in self.slot2id.items()}
@@ -52,7 +52,7 @@ class Lang:
 
 
 class IntentsAndSlotsBERT(data.Dataset):
-    """Custom Dataset for ATIS with BERT tokenization and slot label alignment."""
+    
 
     def __init__(
         self, raw_dataset_items, lang_obj, tokenizer: BertTokenizerFast, max_len=50
@@ -138,7 +138,7 @@ class IntentsAndSlotsBERT(data.Dataset):
 
 
 def collate_fn_bert(batch_samples):
-    """Collates BERT samples: stacks tensors, moves to device, keeps lists as Python lists."""
+    
     input_ids = torch.stack([s["input_ids"] for s in batch_samples])
     attention_masks = torch.stack([s["attention_mask"] for s in batch_samples])
     token_type_ids = torch.stack([s["token_type_ids"] for s in batch_samples])
@@ -158,7 +158,7 @@ def collate_fn_bert(batch_samples):
 
 
 def init_weights_linear(module_with_linear_layers):
-    """Initializes weights for nn.Linear layers (if not using default init)."""
+    
     for m in module_with_linear_layers.modules():
         if isinstance(m, nn.Linear):
             torch.nn.init.uniform_(m.weight, -0.01, 0.01)
