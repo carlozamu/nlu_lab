@@ -76,10 +76,10 @@ if __name__ == "__main__":
     corpus_labels = train_raw + (dev_raw if dev_raw else []) + test_raw
     slots_vocab = set(sum([line["slots"].split() for line in corpus_labels], []))
     intents_vocab = set([line["intent"] for line in corpus_labels])
-    # For BERT, Lang only manages label vocabularies
+
     lang = Lang(intents_vocab, slots_vocab)
 
-    # --- Tokenizer, Datasets, DataLoaders (BERT specific) ---
+    # --- Tokenizer, Datasets, DataLoaders  ---
     tokenizer = BertTokenizerFast.from_pretrained(BERT_MODEL_NAME)
 
     train_dataset = IntentsAndSlotsBERT(
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         test_dataset, batch_size=BATCH_SIZE_EVAL, collate_fn=collate_fn_bert
     )
 
-    # --- Model, Optimizer, Loss (BERT specific) ---
+    # --- Model, Optimizer, Loss  ---
     model = JointBERTModel(
         num_intent_labels=len(lang.intent2id),
         num_slot_labels=len(lang.slot2id),
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     criterion_intents = nn.CrossEntropyLoss()
     criterion_slots = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
-    # --- Training Loop (BERT specific) ---
+    # --- Training Loop  ---
     best_f1_dev = 0.0
     patience_counter = EARLY_STOP_PATIENCE
     best_model_state = copy.deepcopy(model.state_dict())

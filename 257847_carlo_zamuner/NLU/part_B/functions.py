@@ -6,7 +6,6 @@ from conll import evaluate
 
 
 def init_weights_rnn(model_module):
-    
     for module in model_module.modules():
         if isinstance(module, (nn.GRU, nn.LSTM, nn.RNN)):
             for name, param in module.named_parameters():  # type: ignore
@@ -25,7 +24,6 @@ def init_weights_rnn(model_module):
 def train_loop_bert(
     data_loader, optimizer, criterion_slots, criterion_intents, model, clip=1.0
 ):
-    
     model.train()
     total_epoch_loss = 0.0
     for batch in tqdm(data_loader, desc="Training BERT", leave=False, unit="batch"):
@@ -47,8 +45,7 @@ def train_loop_bert(
 
 def eval_loop_bert(
     data_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer_obj=None
-):  
-    
+):
     model.eval()
     total_epoch_loss = 0.0
     all_ref_intents, all_hyp_intents = [], []
