@@ -1,166 +1,181 @@
-import json
-import os
 import torch
 import torch.nn as nn
-import torch.utils.data as data
-from transformers import BertTokenizerFast
-
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda:0")
-else:
-    device = torch.device("cpu")
-
-if device.type == "cuda":
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-PAD_TOKEN = 0
-IGNORE_INDEX = -100
+from tqdm import tqdm
+from sklearn.metrics import classification_report
+from conll import evaluate
 
 
-def load_data(path):
+def init_weights_rnn(model_module):
+    """Initialize weights for RNN-based models using best practices"""
+    for module in model_module.modules():
+        if isinstance(module, (nn.GRU, nn.LSTM, nn.RNN)):
+            for name, param in module.named_parameters():  # type: ignore
+                if "weight_ih" in name:
+                    torch.nn.init.xavier_uniform_(param.data)
+                elif "weight_hh" in name:
+                    torch.nn.init.orthogonal_(param.data)
+                elif "bias" in name:
+                    param.data.fill_(0)
+        elif isinstance(module, nn.Linear):
+            torch.nn.init.uniform_(module.weight, -0.01, 0.01)
+            if module.bias is not None:
+                module.bias.data.fill_(0.01)
+
+
+def train_loop_bert(
+    data_loader, optimizer, criterion_slots, criterion_intents, model, clip=1.0
+):
+    """
+    Training loop for BERT model that performs joint intent classification and slot filling.
     
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.loads(f.read())
-    except FileNotFoundError:
-        print(f"CRITICAL ERROR: Data file not found at {path}.")
-        exit()
-    except json.JSONDecodeError:
-        print(f"CRITICAL ERROR: Could not decode JSON from {path}.")
-        exit()
-
-
-class Lang:
+    The model predicts both:
+    - Intent: what the user wants to do (e.g., "book_flight", "get_weather")  
+    - Slots: important entities in the sentence (e.g., "Chicago" = B-city, "tomorrow" = B-date)
+    """
+    model.train()
+    total_epoch_loss = 0.0
     
-
-    def __init__(self, intent_labels_set, slot_labels_set):
-        self.slot2id = self._build_label_vocab(
-            slot_labels_set, add_pad=True, pad_id_val=PAD_TOKEN
+    for batch in tqdm(data_loader, desc="Training BERT", leave=False, unit="batch"):
+        optimizer.zero_grad()
+        
+        # Forward pass: get predictions for both intents and slots
+        intent_logits, slot_logits = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            token_type_ids=batch["token_type_ids"],
         )
-        self.intent2id = self._build_label_vocab(intent_labels_set, add_pad=False)
-        self.id2slot = {idx: slot for slot, idx in self.slot2id.items()}
-        self.id2intent = {idx: intent for intent, idx in self.intent2id.items()}
+        
+        # Calculate loss for both tasks
+        loss_intent = criterion_intents(intent_logits, batch["intent_labels"])
+        loss_slot = criterion_slots(slot_logits.permute(0, 2, 1), batch["slot_labels"])
+        
+        # Joint loss: combine both tasks (multi-task learning)
+        current_loss = loss_intent + loss_slot
+        total_epoch_loss += current_loss.item()
+        
+        # Backward pass and optimization
+        current_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)  # Prevent exploding gradients
+        optimizer.step()
+        
+    return total_epoch_loss / len(data_loader) if data_loader else float("inf")
 
-    def _build_label_vocab(self, labels_set, add_pad=True, pad_id_val=0):
-        vocab = {"pad": pad_id_val} if add_pad else {}
-        for label in sorted(list(labels_set)):
-            if label not in vocab:
-                vocab[label] = len(vocab)
-        return vocab
 
-
-class IntentsAndSlotsBERT(data.Dataset):
+def eval_loop_bert(
+    data_loader, criterion_slots, criterion_intents, model, lang_obj, tokenizer_obj=None
+):
+    """
+    Evaluation loop that computes metrics for both intent classification and slot filling.
     
+    Returns:
+    - Slot F1 score: measures how well the model identifies entity boundaries  
+    - Intent accuracy: percentage of correctly classified intents
+    - Average loss: for monitoring training progress
+    """
+    model.eval()
+    total_epoch_loss = 0.0
+    all_ref_intents, all_hyp_intents = [], []  # Reference vs predicted intents
+    all_ref_slot_sequences, all_hyp_slot_sequences = [], []  # Reference vs predicted slots
 
-    def __init__(
-        self, raw_dataset_items, lang_obj, tokenizer: BertTokenizerFast, max_len=50
-    ):
-        self.lang = lang_obj
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.ignore_index_val = IGNORE_INDEX
-        (
-            self.processed_input_ids,
-            self.processed_attention_masks,
-            self.processed_token_type_ids,
-        ) = [], [], []
-        self.processed_intent_labels, self.processed_slot_labels = [], []
-        (
-            self.original_words_list_batch,
-            self.original_slot_labels_list_batch,
-            self.word_ids_list_batch,
-        ) = [], [], []
-
-        for item in raw_dataset_items:
-            utterance_text = item["utterance"]
-            original_words = utterance_text.split()
-            original_slot_labels_str = item["slots"].split()
-            encoded_utterance = tokenizer.encode_plus(
-                utterance_text,
-                max_length=self.max_len,
-                padding="max_length",
-                truncation=True,
-                return_attention_mask=True,
-                return_token_type_ids=True,
-                return_tensors="pt",
+    with torch.no_grad():
+        for batch in tqdm(
+            data_loader, desc="Evaluating BERT", leave=False, unit="batch"
+        ):
+            # Get model predictions
+            intent_logits, slot_logits = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                token_type_ids=batch["token_type_ids"],
             )
-            current_input_ids = encoded_utterance["input_ids"].squeeze(0)
-            current_word_ids = encoded_utterance.word_ids(batch_index=0)
-            if current_word_ids is None:
-                print(
-                    f"Warning: word_ids not obtained for: {utterance_text}. Skipping."
+            
+            # Calculate loss
+            loss_intent = criterion_intents(intent_logits, batch["intent_labels"])
+            loss_slot = criterion_slots(
+                slot_logits.permute(0, 2, 1), batch["slot_labels"]
+            )
+            total_epoch_loss += (loss_intent + loss_slot).item()
+
+            # Process intent predictions (simple classification)
+            pred_intent_ids = torch.argmax(intent_logits, dim=1).cpu().tolist()
+            all_hyp_intents.extend(
+                [lang_obj.id2intent.get(idx, "UNK_INTENT") for idx in pred_intent_ids]
+            )
+            all_ref_intents.extend(
+                [
+                    lang_obj.id2intent.get(idx, "UNK_INTENT")
+                    for idx in batch["intent_labels"].cpu().tolist()
+                ]
+            )
+
+            # Process slot predictions (more complex: need to align with original words)
+            pred_slot_ids_batch = torch.argmax(slot_logits, dim=-1).cpu().tolist()
+            
+            for i in range(batch["input_ids"].size(0)):
+                word_ids_sample = batch["word_ids"][i]
+                attn_mask_sample = batch["attention_mask"][i].cpu().tolist()
+                original_slots_sample = batch["original_slot_labels"][i]
+                original_words_sample = batch["original_words"][i]
+                pred_slot_ids_sample = pred_slot_ids_batch[i]
+                
+                # Align BERT subword predictions back to original words
+                # This is crucial because BERT tokenizes words into subwords
+                aligned_pred_slots = []
+                last_word_idx = -1
+                for token_idx, word_idx in enumerate(word_ids_sample):
+                    if word_idx is not None and attn_mask_sample[token_idx] == 1:
+                        if word_idx != last_word_idx:  # First subword of each word
+                            if word_idx < len(original_words_sample):
+                                aligned_pred_slots.append(
+                                    lang_obj.id2slot.get(
+                                        pred_slot_ids_sample[token_idx], "O"
+                                    )
+                                )
+                        last_word_idx = word_idx
+
+                # Ensure all sequences have the same length for evaluation
+                min_len = min(
+                    len(original_words_sample),
+                    len(original_slots_sample),
+                    len(aligned_pred_slots),
                 )
-                continue
-
-            aligned_slot_label_ids = [self.ignore_index_val] * len(current_input_ids)
-            previous_word_idx = -1
-            for token_pos, word_idx in enumerate(current_word_ids):
-                if word_idx is not None:  # Token corresponds to a word
-                    if word_idx != previous_word_idx:  # First sub-token of the word
-                        if word_idx < len(original_slot_labels_str):
-                            aligned_slot_label_ids[token_pos] = self.lang.slot2id.get(
-                                original_slot_labels_str[word_idx],
-                                self.ignore_index_val,
+                if min_len > 0:
+                    all_ref_slot_sequences.append(
+                        list(
+                            zip(
+                                original_words_sample[:min_len],
+                                original_slots_sample[:min_len],
                             )
-                    previous_word_idx = word_idx
+                        )
+                    )
+                    all_hyp_slot_sequences.append(
+                        list(
+                            zip(
+                                original_words_sample[:min_len],
+                                aligned_pred_slots[:min_len],
+                            )
+                        )
+                    )
 
-            self.processed_input_ids.append(current_input_ids)
-            self.processed_attention_masks.append(
-                encoded_utterance["attention_mask"].squeeze(0)
+    # Calculate evaluation metrics
+    slot_f1 = 0.0
+    if all_ref_slot_sequences and all_hyp_slot_sequences:
+        try:
+            # F1 score for slot filling (entity recognition)
+            slot_f1 = (
+                evaluate(all_ref_slot_sequences, all_hyp_slot_sequences)
+                .get("total", {})
+                .get("f", 0.0)
             )
-            self.processed_token_type_ids.append(
-                encoded_utterance["token_type_ids"].squeeze(0)
-            )
-            self.processed_intent_labels.append(
-                self.lang.intent2id.get(item["intent"], -1)
-            )
-            self.processed_slot_labels.append(torch.LongTensor(aligned_slot_label_ids))
-            self.original_words_list_batch.append(original_words)
-            self.original_slot_labels_list_batch.append(original_slot_labels_str)
-            self.word_ids_list_batch.append(current_word_ids)
+        except Exception:
+            pass
 
-    def __len__(self):
-        return len(self.processed_input_ids)
-
-    def __getitem__(self, idx):
-        return {
-            "input_ids": self.processed_input_ids[idx],
-            "attention_mask": self.processed_attention_masks[idx],
-            "token_type_ids": self.processed_token_type_ids[idx],
-            "intent_labels": self.processed_intent_labels[idx],
-            "slot_labels": self.processed_slot_labels[idx],
-            "original_words": self.original_words_list_batch[idx],
-            "original_slot_labels": self.original_slot_labels_list_batch[idx],
-            "word_ids": self.word_ids_list_batch[idx],
-        }
-
-
-def collate_fn_bert(batch_samples):
+    # Accuracy for intent classification
+    intent_acc = classification_report(
+        all_ref_intents, all_hyp_intents, zero_division=0, output_dict=True
+    ).get("accuracy", 0.0)
     
-    input_ids = torch.stack([s["input_ids"] for s in batch_samples])
-    attention_masks = torch.stack([s["attention_mask"] for s in batch_samples])
-    token_type_ids = torch.stack([s["token_type_ids"] for s in batch_samples])
-    intent_labels = torch.LongTensor([s["intent_labels"] for s in batch_samples])
-    slot_labels = torch.stack([s["slot_labels"] for s in batch_samples])
-
-    return {  # Tensors moved to device, lists remain as Python lists
-        "input_ids": input_ids.to(device),
-        "attention_mask": attention_masks.to(device),
-        "token_type_ids": token_type_ids.to(device),
-        "intent_labels": intent_labels.to(device),
-        "slot_labels": slot_labels.to(device),
-        "original_words": [s["original_words"] for s in batch_samples],
-        "original_slot_labels": [s["original_slot_labels"] for s in batch_samples],
-        "word_ids": [s["word_ids"] for s in batch_samples],
-    }
-
-
-def init_weights_linear(module_with_linear_layers):
+    mean_epoch_loss = (
+        total_epoch_loss / len(data_loader) if data_loader else float("inf")
+    )
     
-    for m in module_with_linear_layers.modules():
-        if isinstance(m, nn.Linear):
-            torch.nn.init.uniform_(m.weight, -0.01, 0.01)
-            if m.bias is not None:
-                m.bias.data.fill_(0.01)
+    return slot_f1, intent_acc, mean_epoch_loss
