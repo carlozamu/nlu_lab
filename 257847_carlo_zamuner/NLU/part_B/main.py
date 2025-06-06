@@ -5,16 +5,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from collections import Counter
-from tabulate import tabulate
 import copy
-from functions import (
-    device,
-    IGNORE_INDEX,
-    Lang,
-    IntentsAndSlotsBERT,
-    collate_fn_bert,
-    load_data,
-)
+from functions import device, IGNORE_INDEX, Lang, IntentsAndSlotsBERT, collate_fn_bert, load_data
 from utils import train_loop_bert, eval_loop_bert
 from model import JointBERTModel
 from transformers import BertTokenizerFast
@@ -214,12 +206,13 @@ if __name__ == "__main__":
         # Display results
         print("\n--- EVALUATION RESULTS SUMMARY ---")
         if evaluation_results:
-            headers = ["Model", "Slot F1", "Intent Accuracy", "Test Loss"]
-            table_data = [
-                [r["model_name"], r["slot_f1"], r["intent_accuracy"], r["test_loss"]]
-                for r in evaluation_results
-            ]
-            print(tabulate(table_data, headers=headers, tablefmt="grid"))
+            # Format results without tabulate
+            print("=" * 80)
+            print(f"{'Model':<40} {'Slot F1':<12} {'Intent Accuracy':<16} {'Test Loss':<12}")
+            print("=" * 80)
+            for result in evaluation_results:
+                print(f"{result['model_name']:<40} {result['slot_f1']:<12} {result['intent_accuracy']:<16} {result['test_loss']:<12}")
+            print("=" * 80)
 
         print("--- Evaluation Finished ---")
         exit()
@@ -352,14 +345,14 @@ if __name__ == "__main__":
         )
 
         print("\n--- FINAL TEST RESULTS (BERT Best Config) ---")
-        results_data = [
-            ["Metric", "Value"],
-            ["Configuration", config_name],
-            ["Test Slot F1", f"{test_f1:.4f}"],
-            ["Test Intent Accuracy", f"{test_acc:.4f}"],
-            ["Test Loss (average)", f"{test_loss:.4f}"],
-        ]
-        print(tabulate(results_data, headers="firstrow", tablefmt="grid"))
+        # Format results without tabulate
+        print("=" * 50)
+        print(f"Configuration: {config_name}")
+        print("-" * 50)
+        print(f"Test Slot F1:        {test_f1:.4f}")
+        print(f"Test Intent Accuracy: {test_acc:.4f}")
+        print(f"Test Loss (average):  {test_loss:.4f}")
+        print("=" * 50)
     else:
         print("CRITICAL ERROR: No model state available for final BERT testing.")
 
