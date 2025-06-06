@@ -203,18 +203,7 @@ if __name__ == "__main__":
                 )
                 print("  ✗ Failed to evaluate")
 
-        # Display results
-        print("\n--- EVALUATION RESULTS SUMMARY ---")
-        if evaluation_results:
-            # Format results without tabulate
-            print("=" * 80)
-            print(f"{'Model':<40} {'Slot F1':<12} {'Intent Accuracy':<16} {'Test Loss':<12}")
-            print("=" * 80)
-            for result in evaluation_results:
-                print(f"{result['model_name']:<40} {result['slot_f1']:<12} {result['intent_accuracy']:<16} {result['test_loss']:<12}")
-            print("=" * 80)
-
-        print("--- Evaluation Finished ---")
+       
         exit()
 
     # ========== TRAINING MODE ==========
@@ -346,13 +335,13 @@ if __name__ == "__main__":
 
         print("\n--- FINAL TEST RESULTS (BERT Best Config) ---")
         # Format results without tabulate
-        print("=" * 50)
+
         print(f"Configuration: {config_name}")
-        print("-" * 50)
+
         print(f"Test Slot F1:        {test_f1:.4f}")
         print(f"Test Intent Accuracy: {test_acc:.4f}")
         print(f"Test Loss (average):  {test_loss:.4f}")
-        print("=" * 50)
+
     else:
         print("CRITICAL ERROR: No model state available for final BERT testing.")
 

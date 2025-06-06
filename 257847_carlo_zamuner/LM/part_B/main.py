@@ -62,7 +62,7 @@ if __name__ == "__main__":
     # CONFIGURATION
     # ========================
     # Set to True to evaluate all saved models instead of training
-    EVAL_ONLY = False
+    EVAL_ONLY = True
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"Device: {DEVICE}")
 
