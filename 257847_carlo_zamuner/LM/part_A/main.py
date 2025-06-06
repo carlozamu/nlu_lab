@@ -7,6 +7,7 @@ import copy
 from functools import partial
 import os
 from tqdm import tqdm
+import numpy as np
 
 from functions import train_loop, eval_loop, init_weights
 from utils import read_file, get_vocab, Lang, PennTreeBank, collate_fn
@@ -63,8 +64,7 @@ if __name__ == "__main__":
     # ========================
     # CONFIGURATION
     # ========================
-    # Set to True to evaluate all saved models instead of training
-    EVAL_ONLY = False
+    EVAL_ONLY = True
 
     # Device setup
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -147,73 +147,87 @@ if __name__ == "__main__":
             ),
         )
 
-        # Initialize model, optimizer, and loss functions
-        print("Initializing Model, Optimizer, Loss...")
-        model = LM_LSTM_With_Dropout(
-            emb_size=emb,
-            hidden_size=hid,
-            output_size=vocab_len,
-            pad_index=lang.word2id["<pad>"],
-            emb_dropout=emb_dropout,
-            fc_dropout=fc_dropout,
-        ).to(DEVICE)
-        model.apply(init_weights)  # Apply custom weight initialization
+        # Multiple runs for statistical significance
+        runs = 5
+        test_ppls = []
+        
+        for run_idx in tqdm(range(0, runs), desc="Total Runs"):
+            print(f"\n--- Run {run_idx + 1}/{runs} ---")
+            
+            # Initialize model, optimizer, and loss functions
+            print("Initializing Model, Optimizer, Loss...")
+            model = LM_LSTM_With_Dropout(
+                emb_size=emb,
+                hidden_size=hid,
+                output_size=vocab_len,
+                pad_index=lang.word2id["<pad>"],
+                emb_dropout=emb_dropout,
+                fc_dropout=fc_dropout,
+            ).to(DEVICE)
+            model.apply(init_weights)  # Apply custom weight initialization
 
-        optimizer = optim.AdamW(model.parameters(), lr=lr)
-        criterion_train = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"])
-        criterion_eval = nn.CrossEntropyLoss(
-            ignore_index=lang.word2id["<pad>"], reduction="sum"
-        )
+            optimizer = optim.AdamW(model.parameters(), lr=lr)
+            criterion_train = nn.CrossEntropyLoss(ignore_index=lang.word2id["<pad>"])
+            criterion_eval = nn.CrossEntropyLoss(
+                ignore_index=lang.word2id["<pad>"], reduction="sum"
+            )
 
-        # Training loop with early stopping
-        print("Starting Training...")
-        patience_counter = patience
-        best_ppl = math.inf
-        best_model = None
-        sampled_epochs = []
-        losses_train = []
-        losses_dev = []
+            # Training loop with early stopping
+            print("Starting Training...")
+            patience_counter = patience
+            best_ppl = math.inf
+            best_model = None
+            sampled_epochs = []
+            losses_train = []
+            losses_dev = []
 
-        pbar = tqdm(range(1, n_epochs + 1))
-        for epoch in pbar:
-            # Train for one epoch
-            loss = train_loop(train_loader, optimizer, criterion_train, model, clip)
+            pbar = tqdm(range(1, n_epochs + 1), desc=f"Run {run_idx + 1} Epochs", leave=False)
+            for epoch in pbar:
+                # Train for one epoch
+                loss = train_loop(train_loader, optimizer, criterion_train, model, clip)
 
-            # Evaluate on development set every epoch
-            if epoch % 1 == 0:
-                sampled_epochs.append(epoch)
-                losses_train.append(loss)
-                ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
-                losses_dev.append(loss_dev)
-                pbar.set_description("PPL: %f" % ppl_dev)
+                # Evaluate on development set every epoch
+                if epoch % 1 == 0:
+                    sampled_epochs.append(epoch)
+                    losses_train.append(loss)
+                    ppl_dev, loss_dev = eval_loop(dev_loader, criterion_eval, model)
+                    losses_dev.append(loss_dev)
+                    pbar.set_description(f"PPL: {ppl_dev:.4f}")
 
-                # Early stopping logic: save best model and check patience
-                if ppl_dev < best_ppl:
-                    best_ppl = ppl_dev
-                    best_model = copy.deepcopy(model).to("cpu")
-                    patience_counter = patience
-                else:
-                    patience_counter -= 1
+                    # Early stopping logic: save best model and check patience
+                    if ppl_dev < best_ppl:
+                        best_ppl = ppl_dev
+                        best_model = copy.deepcopy(model).to("cpu")
+                        patience_counter = patience
+                    else:
+                        patience_counter -= 1
 
-                if patience_counter <= 0:
-                    print(f"\nEarly stopping at epoch {epoch}.")
-                    break
+                    if patience_counter <= 0:
+                        print(f"\nEarly stopping at epoch {epoch}.")
+                        break
 
-        # Final evaluation on test set
-        if best_model is not None:
-            best_model.to(DEVICE)
-            final_ppl, _ = eval_loop(test_loader, criterion_eval, best_model)
-            print("Test ppl: ", final_ppl)
+            # Final evaluation on test set
+            if best_model is not None:
+                best_model.to(DEVICE)
+                final_ppl, _ = eval_loop(test_loader, criterion_eval, best_model)
+                print(f"Run {run_idx + 1} - Test ppl: {final_ppl:.4f}")
+                test_ppls.append(final_ppl)
 
-            # Save model (commented out for now)
-            # print("\nSaving best model...")
-            # os.makedirs(model_save_dir, exist_ok=True)
-            # model_filename = f"{experiment_step}_lr{lr}_bs{batch_size}.pt"
-            # model_save_path = os.path.join(model_save_dir, model_filename)
-            # try:
-            # torch.save(best_model.state_dict(), model_save_path)
-            # print(f"Model saved to: {model_save_path}")
-            # except Exception as e:
-            # print(f"Error saving model: {e}")
-        else:
-            print("\nNo best model found.")
+                # Save model for the best run only
+                if run_idx == 0:  # Save only first run for now
+                    print("\nSaving best model from first run...")
+                    os.makedirs(model_save_dir, exist_ok=True)
+                    model_filename = f"{experiment_step}_lr{lr}_bs{batch_size}.pt"
+                    model_save_path = os.path.join(model_save_dir, model_filename)
+                    try:
+                        torch.save(best_model.state_dict(), model_save_path)
+                        print(f"Model saved to: {model_save_path}")
+                    except Exception as e:
+                        print(f"Error saving model: {e}")
+            else:
+                print("\nNo best model found for this run.")
+        
+        # Calculate statistics across all runs
+        test_ppls = np.array(test_ppls)
+        print("\n--- FINAL RESULTS ---")
+        print(f"Test Perplexity: {test_ppls.mean():.4f} ± {test_ppls.std():.4f}")
