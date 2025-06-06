@@ -183,7 +183,7 @@ if __name__ == "__main__":
     # ========================
     # EVALUATION MODE FLAG
     # ========================
-    EVAL_ONLY = True  # Set to True for evaluation, False for training
+    EVAL_ONLY = True
 
     # Model hyperparameters
     hid_size = 200  # LSTM hidden size

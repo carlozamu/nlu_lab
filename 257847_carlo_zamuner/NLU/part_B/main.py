@@ -21,7 +21,7 @@ from transformers import BertTokenizerFast
 from sklearn.model_selection import train_test_split
 
 # ========== MODE CONFIGURATION ==========
-EVAL_ONLY = True  # Set to True to only evaluate saved models in bin/
+EVAL_ONLY = True
 
 if __name__ == "__main__":
     # ========== HYPERPARAMETERS ==========

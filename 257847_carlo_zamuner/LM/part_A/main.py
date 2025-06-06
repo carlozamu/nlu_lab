@@ -150,10 +150,10 @@ if __name__ == "__main__":
         # Multiple runs for statistical significance
         runs = 5
         test_ppls = []
-        
+
         for run_idx in tqdm(range(0, runs), desc="Total Runs"):
             print(f"\n--- Run {run_idx + 1}/{runs} ---")
-            
+
             # Initialize model, optimizer, and loss functions
             print("Initializing Model, Optimizer, Loss...")
             model = LM_LSTM_With_Dropout(
@@ -181,7 +181,9 @@ if __name__ == "__main__":
             losses_train = []
             losses_dev = []
 
-            pbar = tqdm(range(1, n_epochs + 1), desc=f"Run {run_idx + 1} Epochs", leave=False)
+            pbar = tqdm(
+                range(1, n_epochs + 1), desc=f"Run {run_idx + 1} Epochs", leave=False
+            )
             for epoch in pbar:
                 # Train for one epoch
                 loss = train_loop(train_loader, optimizer, criterion_train, model, clip)
@@ -226,7 +228,7 @@ if __name__ == "__main__":
                         print(f"Error saving model: {e}")
             else:
                 print("\nNo best model found for this run.")
-        
+
         # Calculate statistics across all runs
         test_ppls = np.array(test_ppls)
         print("\n--- FINAL RESULTS ---")
