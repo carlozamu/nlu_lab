@@ -45,17 +45,6 @@ def init_weights(mat):
 def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=5):
     """
     Single training epoch for joint Intent and Slot Classification
-    
-    Args:
-        data: Training data loader
-        optimizer: PyTorch optimizer
-        criterion_slots: Loss function for slot classification
-        criterion_intents: Loss function for intent classification
-        model: The neural network model
-        clip: Gradient clipping threshold
-        
-    Returns:
-        loss_array: List of batch losses for this epoch
     """
     model.train()  # Set model to training mode
     loss_array = []
@@ -89,18 +78,6 @@ def train_loop(data, optimizer, criterion_slots, criterion_intents, model, clip=
 def eval_loop(data, criterion_slots, criterion_intents, model, lang):
     """
     Evaluation loop for both validation and test sets
-    
-    Args:
-        data: Evaluation data loader
-        criterion_slots: Loss function for slot classification
-        criterion_intents: Loss function for intent classification  
-        model: The neural network model
-        lang: Language object for converting indices back to labels
-        
-    Returns:
-        results: Slot classification results (including F1 score)
-        report_intent: Intent classification results (including accuracy)
-        loss_array: List of batch losses
     """
     model.eval()  # Set model to evaluation mode
     loss_array = []

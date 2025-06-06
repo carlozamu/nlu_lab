@@ -7,15 +7,7 @@ from torch.utils.data import DataLoader
 from collections import Counter
 from tabulate import tabulate
 import copy
-from utils import (
-    device,
-    PAD_TOKEN,
-    Lang,
-    IntentsAndSlots,
-    collate_fn,
-    load_data,
-    train_test_split,
-)
+from utils import device, PAD_TOKEN, Lang, IntentsAndSlots, collate_fn, load_data, train_test_split
 from model import ModelIAS
 from functions import init_weights, train_loop, eval_loop
 

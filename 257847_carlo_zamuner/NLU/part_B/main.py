@@ -7,14 +7,7 @@ from collections import Counter
 from tabulate import tabulate
 import copy
 from functions import train_loop_bert, eval_loop_bert
-from utils import (
-    device,
-    IGNORE_INDEX,
-    Lang,
-    IntentsAndSlotsBERT,
-    collate_fn_bert,
-    load_data,
-)
+from utils import device, IGNORE_INDEX, Lang, IntentsAndSlotsBERT, collate_fn_bert, load_data
 from model import JointBERTModel
 from transformers import BertTokenizerFast
 from sklearn.model_selection import train_test_split

@@ -5,9 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data as data
-from sklearn.model_selection import (
-    train_test_split,
-)
+from sklearn.model_selection import train_test_split
 
 """
 DATA PROCESSING UTILITIES
@@ -52,11 +50,6 @@ class Lang:
     def w2id(self, elements, cutoff=None, unk=True):
         """
         Create word-to-index mapping with frequency cutoff and unknown token handling
-        
-        Args:
-            elements: List of words
-            cutoff: Minimum frequency threshold (words below this are ignored)
-            unk: Whether to include unknown token for out-of-vocabulary words
         """
         vocab = {"pad": PAD_TOKEN}  # Start with padding token
         if unk:
@@ -72,10 +65,6 @@ class Lang:
     def lab2id(self, elements, pad=True):
         """
         Create label-to-index mapping for slots or intents
-        
-        Args:
-            elements: Set of labels (slots or intents)
-            pad: Whether to include padding token (True for slots, False for intents)
         """
         vocab = {}
         if pad:

@@ -53,14 +53,6 @@ class ModelIAS(nn.Module):
     def forward(self, utterance, seq_lengths):
         """
         Forward pass for joint Intent and Slot Classification
-        
-        Args:
-            utterance: Batch of tokenized utterances [batch_size, max_len]
-            seq_lengths: Actual lengths of each utterance [batch_size]
-            
-        Returns:
-            slots: Slot predictions [batch_size, num_slots, max_len] 
-            intent: Intent predictions [batch_size, num_intents]
         """
         
         # 1. Convert word indices to embeddings

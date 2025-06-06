@@ -6,12 +6,6 @@ def read_file(path: str, eos_token: str = "<eos>") -> list[str]:
     """
     Reads a text file and processes it for language modeling.
     Each line becomes a sentence with an end-of-sentence token appended.
-    
-    Args:
-        path (str): Path to the text file.
-        eos_token (str): End-of-sentence token to append.
-    Returns:
-        list[str]: List of sentences, each ending with eos_token.
     """
     output = []
     with open(path, "r") as f:

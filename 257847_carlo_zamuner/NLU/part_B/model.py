@@ -42,15 +42,6 @@ class JointBERTModel(nn.Module):
     def forward(self, input_ids, attention_mask, token_type_ids):
         """
         Forward pass through the joint model.
-        
-        Args:
-            input_ids: BERT token IDs [batch_size, seq_len]
-            attention_mask: mask for padding tokens [batch_size, seq_len] 
-            token_type_ids: segment IDs for BERT [batch_size, seq_len]
-            
-        Returns:
-            intent_logits: intent classification scores [batch_size, num_intents]
-            slot_logits: slot classification scores [batch_size, seq_len, num_slots]
         """
         
         # Pass through BERT encoder to get contextualized representations

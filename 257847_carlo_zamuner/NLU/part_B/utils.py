@@ -27,10 +27,6 @@ def train_loop_bert(
 ):
     """
     Training loop for BERT model that performs joint intent classification and slot filling.
-    
-    The model predicts both:
-    - Intent: what the user wants to do (e.g., "book_flight", "get_weather")  
-    - Slots: important entities in the sentence (e.g., "Chicago" = B-city, "tomorrow" = B-date)
     """
     model.train()
     total_epoch_loss = 0.0
